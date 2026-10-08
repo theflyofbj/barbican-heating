@@ -251,7 +251,6 @@ button:hover,select:hover,input:hover{border-color:var(--accent)}
 .latest tr:last-child td{border-bottom:0}
 .latest .warn{color:var(--muted);font-style:italic}
 #chart{width:100%;height:min(86vh,880px);min-height:640px}
-.rangeslider-mask-min,.rangeslider-mask-max{fill:var(--muted)!important;fill-opacity:.28!important}
 footer{color:var(--muted);font-size:.78rem;margin-top:6px}
 noscript{display:block;padding:12px;color:var(--muted)}
 </style>
@@ -398,7 +397,7 @@ function build(){
       hovertemplate: HT_TOT, xaxis: 'x2', yaxis: 'y4' });
 
   const fg = css('--fg'), grid = css('--line'), panel = css('--panel');
-  const D1 = [0.40, 1], D2 = [0, 0.31];
+  const D1 = [0.42, 1], D2 = [0.07, 0.34];
   // temperature axes (right) sit underneath; the heating axes (left) overlay them so the dots draw over the bars
   const tAxis = (dom, anchor, rng, title) => ({ domain: dom, anchor: anchor, side: 'right', range: rng, visible: hasT, showgrid: false,
     zeroline: !!(rng && rng[0] < 0), zerolinecolor: grid, fixedrange: true, ticksuffix: ' °C', title: { text: title } });
@@ -411,8 +410,7 @@ function build(){
     hoverlabel: { bgcolor: panel, bordercolor: grid, font: { color: fg } },
     legend: { orientation: 'h', x: 0, y: 1, yanchor: 'bottom' },
     xaxis: { type: 'date', anchor: 'y', gridcolor: grid, linecolor: grid, showticklabels: false },
-    xaxis2: { type: 'date', anchor: 'y2', matches: 'x', gridcolor: grid, linecolor: grid,
-      rangeslider: { visible: true, thickness: 0.09, bgcolor: panel, bordercolor: grid, borderwidth: 1 } },
+    xaxis2: { type: 'date', anchor: 'y2', matches: 'x', gridcolor: grid, linecolor: grid },
     yaxis: tAxis(D1, 'x', trW, 'Temperature at start of window'),
     yaxis3: { domain: D1, anchor: 'x', overlaying: 'y', side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
       title: { text: pct ? 'Heating as % of window length' : 'Minutes heating in window' }, ticksuffix: pct ? '%' : '' },
