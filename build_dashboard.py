@@ -332,7 +332,7 @@ function build(){
   const hasT = DATA.hasTemps, nW = W.length, iT = 1 + 2 * nW;   // row = [date, U x nW, A x nW, temp at window start x nW, mean temp over the 24 h]
 
   // ---- windows: temperature at the window start as a bar spanning the window (behind); heating minutes as dots joined by lines
-  const bx = [], bw = [], bt = [], bcd = [];
+  const bx = [], bw = [], bt = [], bcd = [], bxm = [], dbxm = [];
   const lx = [], lu = [], la = [], lcU = [], lcA = [];
   let prev = null;
   S.rows.forEach(r => {
@@ -344,7 +344,7 @@ function build(){
       const sameDay = dstr(s) === dstr(e);
       const when = niceT(s) + ' → ' + (sameDay ? hhmm(e) : niceT(e));
       const mid = stamp((s + e) / 2);
-      bx.push(mid); bw.push((e - s) * 0.96); bt.push(r[iT + k]); bcd.push([w.label, when]);
+      bxm.push((s + e) / 2); bx.push(mid); bw.push((e - s) * 0.96); bt.push(r[iT + k]); bcd.push([w.label, when]);
       const u = r[1 + k], a = r[1 + nW + k];
       lx.push(mid); lu.push(val(u, w.len)); la.push(val(a, w.len));
       const note = () => '';
@@ -367,14 +367,13 @@ function build(){
       const ut = sum(uw), at = sum(aw);
       tu.push(val(ut, SUM_LEN)); ta.push(val(at, SUM_LEN));
       tcU.push(cdTot(t, ut, uw)); tcA.push(cdTot(t, at, aw));
-      dbx.push(stamp(t - 3*HOUR - 30*MIN)); dbt.push(r[iT + nW]); dbc.push([niceD(t)]);   // the 24 h before 08:30 are centred on 20:30 the evening before
+      dbxm.push(t - 3*HOUR - 30*MIN); dbx.push(stamp(t - 3*HOUR - 30*MIN)); dbt.push(r[iT + nW]); dbc.push([niceD(t)]);   // the 24 h before 08:30 are centred on 20:30 the evening before
     } else { tu.push(null); ta.push(null); tcU.push([]); tcA.push([]); }
   }
-  const tRange = vals => {   // temperature axis: zero (or lower) at the bottom, headroom above so the bars stay in the background
+  const tRange = vals => {   // temperature axis: exactly the coldest to warmest reading of the season shown, plus 1 degree each side
     const v = vals.filter(x => x !== null && x !== undefined);
     if (!v.length) return undefined;
-    const lo = Math.min(0, Math.floor(Math.min.apply(null, v)) - 1), mx = Math.max.apply(null, v);
-    return [lo, Math.ceil(mx + (mx - lo) * 0.7)];
+    return [Math.floor(Math.min.apply(null, v)) - 1, Math.ceil(Math.max.apply(null, v)) + 1];
   };
   const trW = tRange(bt), trD = tRange(dbt);
   const HT_TW = '<b>%{customdata[0]} window</b><br>%{customdata[1]}<br>Temperature at the start of the window: <b>%{y:.1f} °C</b><extra></extra>';
@@ -421,7 +420,7 @@ function build(){
     yaxis4: { domain: D2, anchor: 'x2', overlaying: 'y2', side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
       title: { text: pct ? 'Daily total (% of ' + SUM_LEN + ' min)' : 'Daily total (min)' }, ticksuffix: pct ? '%' : '' }
   };
-  return { data: data, layout: layout, S: S };
+  return { data: data, layout: layout, S: S, tv: { wx: bxm, wv: bt, dx: dbxm, dv: dbt } };
 }
 
 function renderLatest(){
@@ -459,10 +458,14 @@ function render(reset){
   const fig = build();
   const keep = (!reset && gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range) ? gd._fullLayout.xaxis.range.slice() : null;
   fig.layout.xaxis.range = keep || wholeRange(fig.S);
+  curTV = fig.tv;
+  const fit = tempFit(fig.layout.xaxis.range);   // temperature axes follow the dates on screen
+  if (fit && fit.w) fig.layout.yaxis.range = fit.w;
+  if (fit && fit.d) fig.layout.yaxis2.range = fit.d;
   const cfg = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] };
   if (reset) {
     // a fresh plot per season, so "Reset axes" / double-click return to THIS season's full range
-    Plotly.newPlot(gd, fig.data, fig.layout, cfg).then(function(){ gd.on('plotly_relayout', syncInputs); });
+    Plotly.newPlot(gd, fig.data, fig.layout, cfg).then(function(){ gd.on('plotly_relayout', onRelayout); });
   } else {
     Plotly.react(gd, fig.data, fig.layout, cfg);
   }
@@ -472,6 +475,29 @@ function render(reset){
     (DATA.hasTemps ? ' · grey-blue bars: temperature (°C, right axis) at the start of each window / averaged over the 24 h' : '') +
     (state.units === 'pct' ? ' · 100% = the full window (' + W.map(w => w.label + ' = ' + w.len + ' min').join(', ') + '); daily total 100% = ' + SUM_LEN + ' min' : '');
   syncInputs();
+}
+
+let curTV = null;
+function fitOne(xs, vs, a, b){
+  let lo = Infinity, hi = -Infinity;
+  for (let i = 0; i < xs.length; i++) {
+    const v = vs[i];
+    if (v !== null && v !== undefined && xs[i] >= a && xs[i] <= b) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  }
+  return isFinite(lo) ? [Math.floor(lo) - 1, Math.ceil(hi) + 1] : null;   // coldest to warmest on screen, plus 1 degree each side
+}
+function tempFit(xr){
+  if (!curTV || !DATA.hasTemps || !xr) return null;
+  const a = axisMs(xr[0]), b = axisMs(xr[1]);
+  return { w: fitOne(curTV.wx, curTV.wv, a, b), d: fitOne(curTV.dx, curTV.dv, a, b) };
+}
+function onRelayout(ev){
+  syncInputs();
+  if (!ev || !Object.keys(ev).some(k => k.indexOf('xaxis') === 0)) return;   // our own y-axis updates must not loop
+  const fit = tempFit(gd._fullLayout.xaxis.range), upd = {};
+  if (fit && fit.w) upd['yaxis.range'] = fit.w;
+  if (fit && fit.d) upd['yaxis2.range'] = fit.d;
+  if (Object.keys(upd).length) Plotly.relayout(gd, upd);
 }
 
 function syncInputs(){
