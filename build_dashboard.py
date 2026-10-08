@@ -265,8 +265,8 @@ noscript{display:block;padding:12px;color:var(--muted)}
     <div class="ctl"><span class="lab">Profile</span>
       <div class="seg" id="profile" role="group" aria-label="Profile">
         <button type="button" data-v="Unbiased" aria-pressed="false">Unbiased</button>
-        <button type="button" data-v="Adjusted" aria-pressed="false">Adjusted</button>
-        <button type="button" data-v="both" aria-pressed="true">Both</button>
+        <button type="button" data-v="Adjusted" aria-pressed="true">Adjusted</button>
+        <button type="button" data-v="both" aria-pressed="false">Both</button>
       </div></div>
     <div class="ctl"><span class="lab">Units</span>
       <div class="seg" id="units" role="group" aria-label="Units">
@@ -307,7 +307,7 @@ const sum = a => a.reduce((p, c) => p + c, 0);
 
 const W = DATA.windows;
 const SUM_LEN = sum(W.map(w => w.len));
-const state = { season: DATA.seasons[0].id, profile: 'both', units: 'min' };
+const state = { season: DATA.seasons[0].id, profile: 'Adjusted', units: 'min' };
 const getSeason = () => DATA.seasons.filter(s => s.id === state.season)[0];
 const bounds = S => ({ first: ms(S.rows[0][0]), last: ms(S.rows[S.rows.length - 1][0]) });
 const wholeRange = S => { const b = bounds(S); return [stamp(b.first - 12*HOUR), stamp(b.last + 12*HOUR)]; };
