@@ -424,7 +424,7 @@ function renderLatest(){
   const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + mins(w.u) + ' (' + pc(w.u, w.len) + ')</td><td>' + mins(w.a) + ' (' + pc(w.a, w.len) + ')</td>'
     + (DATA.hasTemps ? '<td>' + deg(w.t) + '</td>' : '') + '</tr>').join('');
   el.innerHTML = '<h2 id="latest-h">Latest 24 hours · ' + niceD(dayT) + '</h2>'
-    + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN) + ' (most recent blog post)'
+    + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN)
     + (age > 2 ? ' · <span class="warn">this post is ' + age + ' days old</span>' : '')
     + (L.inSeason ? '' : ' · <span class="warn">outside the Oct–Apr season, so it is not in the charts below</span>') + '</p>'
     + '<p>' + parts.join(' ') + '</p><div class="tiles">' + tiles.join('') + '</div>'
