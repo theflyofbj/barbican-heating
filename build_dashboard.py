@@ -387,9 +387,9 @@ function build(){
       marker: { color: ct, opacity: 0.55 }, hovertemplate: HT_TD, xaxis: 'x2', yaxis: 'y2' });
   }
   if (showU) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Unbiased', legendgroup: 'U', x: lx, y: lu, customdata: lcU, connectgaps: false,
-      line: { color: cu, width: 1.6 }, marker: { size: 6, color: cu }, hovertemplate: HT_WIN, xaxis: 'x', yaxis: 'y3' });
+      line: { color: cu, width: 1.2 }, marker: { size: 6, color: cu }, hovertemplate: HT_WIN, xaxis: 'x', yaxis: 'y3' });
   if (showA) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Adjusted', legendgroup: 'A', x: lx, y: la, customdata: lcA, connectgaps: false,
-      line: { color: ca, width: 1.6 }, marker: { size: 6, color: ca }, hovertemplate: HT_WIN, xaxis: 'x', yaxis: 'y3' });
+      line: { color: ca, width: 1.2 }, marker: { size: 6, color: ca }, hovertemplate: HT_WIN, xaxis: 'x', yaxis: 'y3' });
   if (showU) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Unbiased', legendgroup: 'U', showlegend: false,
       x: tx, y: tu, customdata: tcU, connectgaps: false, line: { color: cu, width: 2.2 }, marker: { size: 5, color: cu },
       hovertemplate: HT_TOT, xaxis: 'x2', yaxis: 'y4' });
@@ -459,6 +459,9 @@ function render(reset){
   const keep = (!reset && gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range) ? gd._fullLayout.xaxis.range.slice() : null;
   fig.layout.xaxis.range = keep || wholeRange(fig.S);
   curTV = fig.tv;
+  const st = dotStyle(fig.layout.xaxis.range);   // joining lines only when there is room for them
+  fig.data.forEach(t => { if (t.yaxis === 'y3') { t.mode = st.lines ? 'lines+markers' : 'markers'; t.marker.size = st.size; } });
+  curStyle = st.lines + '|' + st.size;
   const fit = tempFit(fig.layout.xaxis.range);   // temperature axes follow the dates on screen
   if (fit && fit.w) fig.layout.yaxis.range = fit.w;
   if (fit && fit.d) fig.layout.yaxis2.range = fit.d;
@@ -477,7 +480,25 @@ function render(reset){
   syncInputs();
 }
 
-let curTV = null;
+let curTV = null, curStyle = '';
+// Dots are always drawn; the joining lines only appear once the points are far enough apart (about 8 px between windows),
+// and the dots shrink when many days are on screen, so a whole season stays readable.
+function dotStyle(xr){
+  const el = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis._length;
+  const w = el || Math.max(300, gd.clientWidth - 140);
+  const ppd = w / Math.max(1, (axisMs(xr[1]) - axisMs(xr[0])) / DAY);   // pixels per day
+  return { lines: ppd >= 24, size: ppd < 6 ? 3 : (ppd < 24 ? 4 : 6) };
+}
+function restyleDots(){
+  const xr = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range;
+  if (!xr || !gd.data) return;
+  const st = dotStyle(xr), key = st.lines + '|' + st.size;
+  if (key === curStyle) return;
+  curStyle = key;
+  const idx = [];
+  gd.data.forEach((t, i) => { if (t.yaxis === 'y3') idx.push(i); });
+  if (idx.length) Plotly.restyle(gd, { mode: st.lines ? 'lines+markers' : 'markers', 'marker.size': st.size }, idx);
+}
 function fitOne(xs, vs, a, b){
   let lo = Infinity, hi = -Infinity;
   for (let i = 0; i < xs.length; i++) {
@@ -498,7 +519,10 @@ function onRelayout(ev){
   if (fit && fit.w) upd['yaxis.range'] = fit.w;
   if (fit && fit.d) upd['yaxis2.range'] = fit.d;
   if (Object.keys(upd).length) Plotly.relayout(gd, upd);
+  restyleDots();
 }
+let rsz = null;
+window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(restyleDots, 250); });
 
 function syncInputs(){
   const r = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range;
