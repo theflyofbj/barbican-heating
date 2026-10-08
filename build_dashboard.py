@@ -82,7 +82,7 @@ def parse_time(text):
 
 
 def load_temps(path, tz="UTC"):
-    """Hourly temperatures as two parallel lists: London wall-clock datetimes (naive) and deg C.
+    """Hourly temperatures as two parallel lists: UTC epoch seconds and deg C.
 
     The file needs a time column first and a temperature column second (any header names).
     tz says what the times are: "UTC" (default) or "London" (local clock time, already what the blog uses).
@@ -98,29 +98,44 @@ def load_temps(path, tz="UTC"):
                 t, v = parse_time(r[0]), float(r[1])
             except ValueError:
                 continue  # header line or unusable row
-            if tz.upper() == "UTC":
-                t = t.replace(tzinfo=timezone.utc).astimezone(LONDON).replace(tzinfo=None)
-            rows.append((t, v))
+            t = t.replace(tzinfo=timezone.utc) if tz.upper() == "UTC" else t.replace(tzinfo=LONDON)
+            rows.append((t.timestamp(), v))
     rows.sort()
     return [t for t, _ in rows], [v for _, v in rows]
 
 
-def min_temp(times, temps, start, end):
-    """Lowest hourly reading with start <= time <= end, or None if there is none."""
-    i, j = bisect.bisect_left(times, start), bisect.bisect_right(times, end)
-    return round(min(temps[i:j]), 1) if j > i else None
+def epoch(local_dt):
+    """Epoch seconds of a London wall-clock time."""
+    return local_dt.replace(tzinfo=LONDON).timestamp()
+
+
+def temp_at(times, temps, local_dt):
+    """Temperature at a London wall-clock time, interpolated between the two surrounding hourly readings."""
+    t = epoch(local_dt)
+    i = bisect.bisect_right(times, t)
+    if i == 0 or i == len(times) or times[i] - times[i - 1] > 7200:
+        return None
+    a, b = times[i - 1], times[i]
+    return round(temps[i - 1] + (temps[i] - temps[i - 1]) * (t - a) / (b - a), 1)
+
+
+def mean_temp(times, temps, start, end):
+    """Average of the hourly readings in (start, end]; None unless nearly all hours are present."""
+    a, b = epoch(start), epoch(end)
+    i, j = bisect.bisect_right(times, a), bisect.bisect_right(times, b)
+    n_expected = round((b - a) / 3600)
+    return round(sum(temps[i:j]) / (j - i), 1) if j - i >= 0.8 * n_expected else None
 
 
 def day_temps(d, wdefs, times, temps):
-    """Lowest temperature in each window of post day d, then over the whole 24 h before 08:30."""
+    """Temperature at the start of each window of post day d, then the average over the 24 h before 08:30."""
     base = datetime.combine(d, datetime.min.time())
     out = []
     for w in wdefs:
         s = base + timedelta(days=w["startOff"], hours=int(w["start"][:2]), minutes=int(w["start"][3:]))
-        e = base + timedelta(days=w["endOff"], hours=int(w["end"][:2]), minutes=int(w["end"][3:]))
-        out.append(min_temp(times, temps, s, e))
+        out.append(temp_at(times, temps, s))
     end = base + POST_TIME
-    out.append(min_temp(times, temps, end - timedelta(days=1), end))
+    out.append(mean_temp(times, temps, end - timedelta(days=1), end))
     return out
 
 
@@ -151,6 +166,13 @@ def build_payload(csv_path, temp_path=None, temp_tz="UTC"):
     days, window_keys = load(csv_path)
     times, temps = load_temps(temp_path, temp_tz)
     wdefs = window_defs(window_keys)
+    capped = []   # readings longer than their window cannot be real: cap them at the window length
+    for d, profs in days.items():
+        for p_, vals in profs.items():
+            for k, w in zip(window_keys, wdefs):
+                if vals[k] > w["len"]:
+                    capped.append((d.isoformat(), p_, w["label"], num(vals[k])))
+                    vals[k] = float(w["len"])
     seasons, ignored = {}, 0
     for d in sorted(days):
         y = season_start_year(d)
@@ -160,17 +182,19 @@ def build_payload(csv_path, temp_path=None, temp_tz="UTC"):
         row = [d.isoformat()]
         for p in PROFILES:
             row += [num(days[d][p][k]) for k in window_keys]  # raises KeyError if a window is missing
-        row += day_temps(d, wdefs, times, temps)  # lowest temperature per window, then over the whole 24 h
+        row += day_temps(d, wdefs, times, temps)  # temperature at the start of each window, then the 24 h average
         seasons.setdefault(y, []).append(row)
     payload = {
         "windows": wdefs,
         "profiles": PROFILES,
         "hasTemps": bool(times),
-        "tempThrough": times[-1].strftime("%Y-%m-%d") if times else None,
+        "tempThrough": datetime.fromtimestamp(times[-1], LONDON).strftime("%Y-%m-%d") if times else None,
         "seasons": [
             {"id": str(y), "label": f"{y}–{str(y + 1)[2:]}", "rows": seasons[y]}
             for y in sorted(seasons, reverse=True)  # newest season first
         ],
+        "cappedCount": len(capped),
+        "cappedDays": len({c[0] for c in capped}),
         "latest": latest_summary(days, window_keys, wdefs, times, temps),
         "dataThrough": max(days).isoformat(),
         "built": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -305,9 +329,9 @@ function build(){
     : '<b>%{customdata[0]}</b><br>Total <b>%{customdata[2]} min</b> (%{customdata[1]} h)<br>' +
       W.map((w, k) => w.label + ': %{customdata[' + (4 + k) + ']} min').join('<br>') + '<extra>%{fullData.name}</extra>';
 
-  const hasT = DATA.hasTemps, nW = W.length, iT = 1 + 2 * nW;   // row = [date, U x nW, A x nW, tempMin x nW, tempMin of the whole 24 h]
+  const hasT = DATA.hasTemps, nW = W.length, iT = 1 + 2 * nW;   // row = [date, U x nW, A x nW, temp at window start x nW, mean temp over the 24 h]
 
-  // ---- windows: lowest temperature as a bar spanning the window (behind); heating minutes as dots joined by lines
+  // ---- windows: temperature at the window start as a bar spanning the window (behind); heating minutes as dots joined by lines
   const bx = [], bw = [], bt = [], bcd = [];
   const lx = [], lu = [], la = [], lcU = [], lcA = [];
   let prev = null;
@@ -323,9 +347,9 @@ function build(){
       bx.push(mid); bw.push((e - s) * 0.96); bt.push(r[iT + k]); bcd.push([w.label, when]);
       const u = r[1 + k], a = r[1 + nW + k];
       lx.push(mid); lu.push(val(u, w.len)); la.push(val(a, w.len));
-      const note = m => m > w.len ? ' ⚠ longer than the window' : '';
-      lcU.push([w.label, when, w.len, Math.round(100 * u / w.len), note(u), u]);
-      lcA.push([w.label, when, w.len, Math.round(100 * a / w.len), note(a), a]);
+      const note = () => '';
+      lcU.push([w.label, when, w.len, Math.round(100 * u / w.len), note(), u]);
+      lcA.push([w.label, when, w.len, Math.round(100 * a / w.len), note(), a]);
     });
   });
 
@@ -353,14 +377,14 @@ function build(){
     return [lo, Math.ceil(mx + (mx - lo) * 0.7)];
   };
   const trW = tRange(bt), trD = tRange(dbt);
-  const HT_TW = '<b>%{customdata[0]} window</b><br>%{customdata[1]}<br>Lowest temperature <b>%{y:.1f} °C</b><extra></extra>';
-  const HT_TD = '<b>%{customdata[0]}</b><br>Lowest temperature in the 24 h before 08:30: <b>%{y:.1f} °C</b><extra></extra>';
+  const HT_TW = '<b>%{customdata[0]} window</b><br>%{customdata[1]}<br>Temperature at the start of the window: <b>%{y:.1f} °C</b><extra></extra>';
+  const HT_TD = '<b>%{customdata[0]}</b><br>Average temperature over the 24 h before 08:30: <b>%{y:.1f} °C</b><extra></extra>';
 
   const data = [];
   if (hasT) {
-    data.push({ type: 'bar', name: 'Lowest temperature', legendgroup: 'T', x: bx, y: bt, width: bw, customdata: bcd,
+    data.push({ type: 'bar', name: 'Temperature at window start', legendgroup: 'T', x: bx, y: bt, width: bw, customdata: bcd,
       marker: { color: ct, opacity: 0.55 }, hovertemplate: HT_TW, xaxis: 'x', yaxis: 'y' });
-    data.push({ type: 'bar', name: 'Lowest temperature', legendgroup: 'T', showlegend: false, x: dbx, y: dbt, width: dbx.map(() => DAY * 0.92), customdata: dbc,
+    data.push({ type: 'bar', name: 'Average temperature (24 h)', legendgroup: 'T', showlegend: true, x: dbx, y: dbt, width: dbx.map(() => DAY * 0.92), customdata: dbc,
       marker: { color: ct, opacity: 0.55 }, hovertemplate: HT_TD, xaxis: 'x2', yaxis: 'y2' });
   }
   if (showU) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Unbiased', legendgroup: 'U', x: lx, y: lu, customdata: lcU, connectgaps: false,
@@ -390,10 +414,10 @@ function build(){
     xaxis: { type: 'date', anchor: 'y', gridcolor: grid, linecolor: grid, showticklabels: false },
     xaxis2: { type: 'date', anchor: 'y2', matches: 'x', gridcolor: grid, linecolor: grid,
       rangeslider: { visible: true, thickness: 0.09, bgcolor: panel, bordercolor: grid, borderwidth: 1 } },
-    yaxis: tAxis(D1, 'x', trW, 'Lowest temperature in window'),
+    yaxis: tAxis(D1, 'x', trW, 'Temperature at start of window'),
     yaxis3: { domain: D1, anchor: 'x', overlaying: 'y', side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
       title: { text: pct ? 'Heating as % of window length' : 'Minutes heating in window' }, ticksuffix: pct ? '%' : '' },
-    yaxis2: tAxis(D2, 'x2', trD, 'Lowest temp, 24 h'),
+    yaxis2: tAxis(D2, 'x2', trD, 'Average temp, 24 h'),
     yaxis4: { domain: D2, anchor: 'x2', overlaying: 'y2', side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
       title: { text: pct ? 'Daily total (% of ' + SUM_LEN + ' min)' : 'Daily total (min)' }, ticksuffix: pct ? '%' : '' }
   };
@@ -412,23 +436,23 @@ function renderLatest(){
   parts.push('The heating ran for <b>' + mins(L.u) + ' (' + hrs(L.u) + ')</b> on the Unbiased profile and <b>' + mins(L.a) + ' (' + hrs(L.a) + ')</b> on the Adjusted profile, '
     + pc(L.u, SUM_LEN) + ' and ' + pc(L.a, SUM_LEN) + ' of the ' + SUM_LEN + ' minutes available.');
   parts.push(best.u > 0 ? 'Most of it came in the ' + best.label + ' window (' + mins(best.u) + ' Unbiased).' : 'It did not run in any window.');
-  if (L.t !== null && L.t !== undefined) parts.push('The lowest temperature was <b>' + deg(L.t) + '</b>' + (L.prev && L.prev.t !== null ? ' (' + deg(L.prev.t) + ' the day before)' : '') + '.');
+  if (L.t !== null && L.t !== undefined) parts.push('The average temperature over the period was <b>' + deg(L.t) + '</b>' + (L.prev && L.prev.t !== null ? ' (' + deg(L.prev.t) + ' the day before)' : '') + '.');
   if (L.avg) parts.push('The previous ' + L.avg.n + ' days averaged ' + mins(L.avg.u) + ' (Unbiased) and ' + mins(L.avg.a) + ' (Adjusted) a day.');
   const tile = (k, v, d) => '<div class="tile"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="d">' + d + '</div></div>';
   const tiles = [
     tile('Unbiased, total', mins(L.u), hrs(L.u) + ' · ' + pc(L.u, SUM_LEN) + ' of all windows' + (L.prev ? '<br>' + sgn(L.u - L.prev.u) + ' the day before' : '')),
     tile('Adjusted, total', mins(L.a), hrs(L.a) + ' · ' + pc(L.a, SUM_LEN) + ' of all windows' + (L.prev ? '<br>' + sgn(L.a - L.prev.a) + ' the day before' : ''))
   ];
-  if (DATA.hasTemps) tiles.push(tile('Lowest temperature', deg(L.t), L.prev ? 'day before: ' + deg(L.prev.t) : 'in the 24 h to 08:30'));
+  if (DATA.hasTemps) tiles.push(tile('Average temperature', deg(L.t), L.prev ? 'day before: ' + deg(L.prev.t) : 'over the 24 h to 08:30'));
   if (L.avg) tiles.push(tile('Previous ' + L.avg.n + '-day average', L.avg.u + ' / ' + L.avg.a + ' min', 'Unbiased / Adjusted, per day'));
   const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + mins(w.u) + ' (' + pc(w.u, w.len) + ')</td><td>' + mins(w.a) + ' (' + pc(w.a, w.len) + ')</td>'
     + (DATA.hasTemps ? '<td>' + deg(w.t) + '</td>' : '') + '</tr>').join('');
   el.innerHTML = '<h2 id="latest-h">Latest 24 hours · ' + niceD(dayT) + '</h2>'
-    + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN)
+    + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN) + ' (most recent blog post)'
     + (age > 2 ? ' · <span class="warn">this post is ' + age + ' days old</span>' : '')
     + (L.inSeason ? '' : ' · <span class="warn">outside the Oct–Apr season, so it is not in the charts below</span>') + '</p>'
     + '<p>' + parts.join(' ') + '</p><div class="tiles">' + tiles.join('') + '</div>'
-    + '<table><thead><tr><th>Window</th><th>Unbiased</th><th>Adjusted</th>' + (DATA.hasTemps ? '<th>Lowest temp</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    + '<table><thead><tr><th>Window</th><th>Unbiased</th><th>Adjusted</th>' + (DATA.hasTemps ? '<th>Temp at start</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 function render(reset){
@@ -445,7 +469,7 @@ function render(reset){
   const b = bounds(fig.S);
   $('sub').textContent = fig.S.label + ' heating season · ' + fig.S.rows.length + ' days of data (' + niceD(b.first) + ' to ' + niceD(b.last) +
     ') · windows: ' + W.map(w => w.label).join(', ') + ' · each day covers the 24 h before 08:30' +
-    (DATA.hasTemps ? ' · grey-blue bars: lowest hourly temperature (°C, right axis) in each window / in the 24 h' : '') +
+    (DATA.hasTemps ? ' · grey-blue bars: temperature (°C, right axis) at the start of each window / averaged over the 24 h' : '') +
     (state.units === 'pct' ? ' · 100% = the full window (' + W.map(w => w.label + ' = ' + w.len + ' min').join(', ') + '); daily total 100% = ' + SUM_LEN + ' min' : '');
   syncInputs();
 }
@@ -488,7 +512,8 @@ if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEven
 
 $('foot').textContent = 'Source: Barbican Underfloor Heating blog (Atom feed) · data through ' + DATA.dataThrough + (DATA.hasTemps ? ' · temperatures: Open-Meteo, to ' + DATA.tempThrough : '') +
   ' · page built ' + DATA.built +
-  ' · Oct–Apr only; May–Sep posts are ignored';
+  ' · Oct–Apr only; May–Sep posts are ignored' +
+  (DATA.cappedCount ? ' · ' + DATA.cappedCount + ' readings (' + DATA.cappedDays + ' days) above their window length are capped at the window length' : '');
 renderLatest();
 render(true);
 })();
