@@ -219,7 +219,6 @@ TEMPLATE = r'''<!doctype html>
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 main{max-width:1280px;margin:0 auto;padding:16px 16px 12px}
 h1{font-size:1.35rem;margin:0 0 2px}
-.sub{color:var(--muted);margin:0 0 14px;font-size:.88rem}
 .controls{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-end;margin-bottom:8px}
 .ctl{display:flex;flex-direction:column;gap:3px}
 .ctl>label,.ctl>.lab{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -247,6 +246,8 @@ button:hover,select:hover,input:hover{border-color:var(--accent)}
 .latest tr:last-child td{border-bottom:0}
 .latest .warn{color:var(--muted);font-style:italic}
 #chart{width:100%;height:min(86vh,880px);min-height:640px}
+.opt{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:.78rem;cursor:pointer;margin:6px 0 2px}
+.opt input{accent-color:#7b8494;margin:0;cursor:pointer}
 footer{color:var(--muted);font-size:.78rem;margin-top:6px}
 noscript{display:block;padding:12px;color:var(--muted)}
 </style>
@@ -254,16 +255,9 @@ noscript{display:block;padding:12px;color:var(--muted)}
 <body>
 <main>
   <h1>Barbican underfloor heating</h1>
-  <p class="sub" id="sub"></p>
   <section class="latest" id="latest" aria-labelledby="latest-h"></section>
   <div class="controls">
     <div class="ctl"><label for="season">Heating season</label><select id="season"></select></div>
-    <div class="ctl"><span class="lab">Profile</span>
-      <div class="seg" id="profile" role="group" aria-label="Profile">
-        <button type="button" data-v="Unbiased" aria-pressed="false">Unbiased</button>
-        <button type="button" data-v="Adjusted" aria-pressed="true">Adjusted</button>
-        <button type="button" data-v="both" aria-pressed="false">Both</button>
-      </div></div>
     <div class="ctl"><span class="lab">Units</span>
       <div class="seg" id="units" role="group" aria-label="Units">
         <button type="button" data-v="min" aria-pressed="true">Minutes</button>
@@ -273,6 +267,7 @@ noscript{display:block;padding:12px;color:var(--muted)}
     <div class="ctl"><label for="to">To</label><input type="date" id="to"></div>
   </div>
   <div id="chart"></div>
+  <label class="opt"><input type="checkbox" id="unb" autocomplete="off"> Include unbiased data</label>
   <footer id="foot"></footer>
   <noscript>This dashboard needs JavaScript.</noscript>
 </main>
@@ -303,14 +298,14 @@ const sum = a => a.reduce((p, c) => p + c, 0);
 
 const W = DATA.windows;
 const SUM_LEN = sum(W.map(w => w.len));
-const state = { season: DATA.seasons[0].id, profile: 'Adjusted', units: 'min' };
+const state = { season: DATA.seasons[0].id, unbiased: false, units: 'min' };
 const getSeason = () => DATA.seasons.filter(s => s.id === state.season)[0];
 const bounds = S => ({ first: ms(S.rows[0][0]), last: ms(S.rows[S.rows.length - 1][0]) });
 const wholeRange = S => { const b = bounds(S); return [stamp(b.first - 12*HOUR), stamp(b.last + 12*HOUR)]; };
 
 function build(){
   const S = getSeason(), pct = state.units === 'pct';
-  const showU = state.profile !== 'Adjusted', showA = state.profile !== 'Unbiased', both = showU && showA;
+  const showU = state.unbiased, showA = true, both = showU;     // the standard figures are always shown; unbiased only when ticked
   const cu = css('--u'), ca = css('--a'), con = css('--on'), coff = css('--off'), coffl = css('--offline');
   const val = (m, len) => pct ? 100 * m / len : m;
 
@@ -325,10 +320,9 @@ function build(){
       W.map((w, k) => w.label + ': %{customdata[' + (4 + k) + ']} min').join('<br>') + '<extra>%{fullData.name}</extra>';
 
   const hasT = DATA.hasTemps, nW = W.length, iT = 1 + 2 * nW;   // row = [date, U x nW, A x nW, temp at window start x nW, mean temp over the 24 h]
-  // heating counts as "on" for the profile(s) shown
-  const onFn = (u, a) => both ? (u > 0 || a > 0) : (showA ? a > 0 : u > 0);
-  const stateTxt = (u, a) => !onFn(u, a) ? 'Heating off'
-    : 'Heating on: ' + (both ? 'Unbiased ' + u + ' min · Adjusted ' + a + ' min' : (showA ? 'Adjusted ' + a + ' min' : 'Unbiased ' + u + ' min'));
+  // "heating on" always refers to the standard figures, so the temperature line does not change when unbiased data is added
+  const onFn = (u, a) => a > 0;
+  const stateTxt = (u, a) => (a > 0 ? 'Heating on: ' + a + ' min' : 'Heating off') + (showU ? ' · unbiased ' + u + ' min' : '');
 
   // ---- windows: heating minutes as bars (zero = no bar); temperature at the window start as a line, grey/red by heating off/on
   const wb = { c: [], span: [], u: [], a: [], cdU: [], cdA: [] }, wp = [];
@@ -397,10 +391,10 @@ function build(){
     meta: { kind: 'bar', day: day, idx: idx, n: n } });
 
   const nSer = both ? 2 : 1, data = [];
-  if (showU) data.push(barTr('Unbiased', 'U', cu, wb.c, wb.u, wb.cdU, HT_WIN, 'x', 'y', false, 0, nSer, true));
-  if (showA) data.push(barTr('Adjusted', 'A', ca, wb.c, wb.a, wb.cdA, HT_WIN, 'x', 'y', false, showU ? 1 : 0, nSer, true));
-  if (showU) data.push(barTr('Unbiased', 'U', cu, db.c, db.u, db.cdU, HT_TOT, 'x2', 'y2', true, 0, nSer, false));
-  if (showA) data.push(barTr('Adjusted', 'A', ca, db.c, db.a, db.cdA, HT_TOT, 'x2', 'y2', true, showU ? 1 : 0, nSer, false));
+  data.push(barTr('Heating', 'A', ca, wb.c, wb.a, wb.cdA, HT_WIN, 'x', 'y', false, 0, nSer, true));
+  if (showU) data.push(barTr('Unbiased', 'U', cu, wb.c, wb.u, wb.cdU, HT_WIN, 'x', 'y', false, 1, nSer, true));
+  data.push(barTr('Heating', 'A', ca, db.c, db.a, db.cdA, HT_TOT, 'x2', 'y2', true, 0, nSer, false));
+  if (showU) data.push(barTr('Unbiased', 'U', cu, db.c, db.u, db.cdU, HT_TOT, 'x2', 'y2', true, 1, nSer, false));
   if (hasT) {
     const sw = segs(wp, 20*HOUR), sd = segs(dp, 36*HOUR);
     data.push(lineTr('Temperature, heating on', 'Ton', con, sw.on, true, 'x', 'y3', true));
@@ -421,7 +415,7 @@ function build(){
   const hAxis = (dom, anchor, title) => ({ domain: dom, anchor: anchor, side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
     title: { text: title }, ticksuffix: pct ? '%' : '' });
   const layout = {
-    uirevision: state.season + '|' + state.profile + '|' + state.units,
+    uirevision: state.season + '|' + state.unbiased + '|' + state.units,
     barmode: 'overlay', hovermode: 'closest', dragmode: 'zoom',
     margin: { l: 66, r: hasT ? 74 : 16, t: 36, b: 10 },
     paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
@@ -439,34 +433,43 @@ function build(){
 }
 
 function renderLatest(){
-  const L = DATA.latest, el = $('latest');
-  const dayT = ms(L.date), tot = L.u;
+  // The summary describes what the charts below show: the standard heating figures, plus the unbiased ones when that box is ticked.
+  const L = DATA.latest, el = $('latest'), pct = state.units === 'pct', inc = state.unbiased;
+  const dayT = ms(L.date);
   const mins = m => m + ' min', hrs = m => (m / 60).toFixed(1) + ' h', pc = (m, n) => Math.round(100 * m / n) + '%';
-  const sgn = d => d === 0 ? 'same as' : (d > 0 ? '▲ ' + d + ' min more than' : '▼ ' + (-d) + ' min fewer than');
+  const pcd = (m, n) => { const v = 100 * m / n; return (v < 10 ? v.toFixed(1) : Math.round(v)) + '%'; };
+  const big = m => pct ? pcd(m, SUM_LEN) : mins(m);
+  const amt = (m, n) => pct ? pc(m, n) + ' (' + mins(m) + ')' : mins(m) + ' (' + pc(m, n) + ')';     // lead with the unit chosen in the menu
+  const sgn = d => d === 0 ? 'same as' : (pct ? (d > 0 ? '▲ ' + Math.round(100 * d / SUM_LEN) + ' percentage points more than' : '▼ ' + Math.round(-100 * d / SUM_LEN) + ' percentage points fewer than')
+    : (d > 0 ? '▲ ' + d + ' min more than' : '▼ ' + (-d) + ' min fewer than'));
   const deg = t => t === null || t === undefined ? '–' : t.toFixed(1) + ' °C';
-  const best = L.windows.slice().sort((a, b) => b.u - a.u)[0];
   const age = Math.round((axisMs(DATA.built.slice(0, 10)) - dayT) / DAY);
   const parts = [];
-  parts.push('The heating ran for <b>' + mins(L.u) + ' (' + hrs(L.u) + ')</b> on the Unbiased profile and <b>' + mins(L.a) + ' (' + hrs(L.a) + ')</b> on the Adjusted profile, '
-    + pc(L.u, SUM_LEN) + ' and ' + pc(L.a, SUM_LEN) + ' of the ' + SUM_LEN + ' minutes available.');
-  parts.push(best.u > 0 ? 'Most of it came in the ' + best.label + ' window (' + mins(best.u) + ' Unbiased).' : 'It did not run in any window.');
+  parts.push(pct
+    ? 'The heating ran for <b>' + pc(L.a, SUM_LEN) + '</b> of the ' + SUM_LEN + ' minutes available (' + mins(L.a) + ', ' + hrs(L.a) + (inc ? '; unbiased: ' + pc(L.u, SUM_LEN) + ', ' + mins(L.u) : '') + ').'
+    : 'The heating ran for <b>' + mins(L.a) + ' (' + hrs(L.a) + ')</b>, ' + pc(L.a, SUM_LEN) + ' of the ' + SUM_LEN + ' minutes available' + (inc ? ' (unbiased: ' + mins(L.u) + ')' : '') + '.');
+  const best = L.windows.slice().sort((a, b) => b.a - a.a)[0];
+  parts.push(best.a > 0
+    ? 'Most of it came in the ' + best.label + ' window: ' + (pct ? pc(best.a, best.len) + ' of the window, ' + mins(best.a) : mins(best.a) + ', ' + pc(best.a, best.len) + ' of the window') + (inc ? ' (unbiased: ' + mins(best.u) + ')' : '') + '.'
+    : 'It did not run in any window.');
   if (L.t !== null && L.t !== undefined) parts.push('The average temperature over the period was <b>' + deg(L.t) + '</b>' + (L.prev && L.prev.t !== null ? ' (' + deg(L.prev.t) + ' the day before)' : '') + '.');
-  if (L.avg) parts.push('The previous ' + L.avg.n + ' days averaged ' + mins(L.avg.u) + ' (Unbiased) and ' + mins(L.avg.a) + ' (Adjusted) a day.');
+  if (L.avg) parts.push('The previous ' + L.avg.n + ' days averaged ' + big(L.avg.a) + ' a day' + (inc ? ' (unbiased: ' + big(L.avg.u) + ')' : '') + '.');
   const tile = (k, v, d) => '<div class="tile"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="d">' + d + '</div></div>';
-  const tiles = [
-    tile('Unbiased, total', mins(L.u), hrs(L.u) + ' · ' + pc(L.u, SUM_LEN) + ' of all windows' + (L.prev ? '<br>' + sgn(L.u - L.prev.u) + ' the day before' : '')),
-    tile('Adjusted, total', mins(L.a), hrs(L.a) + ' · ' + pc(L.a, SUM_LEN) + ' of all windows' + (L.prev ? '<br>' + sgn(L.a - L.prev.a) + ' the day before' : ''))
-  ];
+  const total = (name, k) => tile(name, big(L[k]),
+    (pct ? mins(L[k]) + ' · ' + hrs(L[k]) : hrs(L[k]) + ' · ' + pc(L[k], SUM_LEN) + ' of all windows') + (L.prev ? '<br>' + sgn(L[k] - L.prev[k]) + ' the day before' : ''));
+  const tiles = [total('Heating, total', 'a')];
+  if (inc) tiles.push(total('Unbiased, total', 'u'));
   if (DATA.hasTemps) tiles.push(tile('Average temperature', deg(L.t), L.prev ? 'day before: ' + deg(L.prev.t) : 'over the 24 h to 08:30'));
-  if (L.avg) tiles.push(tile('Previous ' + L.avg.n + '-day average', L.avg.u + ' / ' + L.avg.a + ' min', 'Unbiased / Adjusted, per day'));
-  const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + mins(w.u) + ' (' + pc(w.u, w.len) + ')</td><td>' + mins(w.a) + ' (' + pc(w.a, w.len) + ')</td>'
+  if (L.avg) tiles.push(tile('Previous ' + L.avg.n + '-day average', (inc ? [L.avg.a, L.avg.u] : [L.avg.a]).map(v => big(v).replace(' min', '')).join(' / ') + (pct ? '' : ' min'),
+    (inc ? 'Heating / Unbiased, per day' : 'per day')));
+  const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + amt(w.a, w.len) + '</td>' + (inc ? '<td>' + amt(w.u, w.len) + '</td>' : '')
     + (DATA.hasTemps ? '<td>' + deg(w.t) + '</td>' : '') + '</tr>').join('');
   el.innerHTML = '<h2 id="latest-h">Latest 24 hours · ' + niceD(dayT) + '</h2>'
     + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN) + ' (most recent blog post)'
     + (age > 2 ? ' · <span class="warn">this post is ' + age + ' days old</span>' : '')
     + (L.inSeason ? '' : ' · <span class="warn">outside the Oct–Apr season, so it is not in the charts below</span>') + '</p>'
     + '<p>' + parts.join(' ') + '</p><div class="tiles">' + tiles.join('') + '</div>'
-    + '<table><thead><tr><th>Window</th><th>Unbiased</th><th>Adjusted</th>' + (DATA.hasTemps ? '<th>Temp at start</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    + '<table><thead><tr><th>Window</th><th>Heating</th>' + (inc ? '<th>Unbiased</th>' : '') + (DATA.hasTemps ? '<th>Temp at start</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
 
 function render(reset){
@@ -487,11 +490,6 @@ function render(reset){
   } else {
     Plotly.react(gd, fig.data, fig.layout, cfg);
   }
-  const b = bounds(fig.S);
-  $('sub').textContent = fig.S.label + ' heating season · ' + fig.S.rows.length + ' days of data (' + niceD(b.first) + ' to ' + niceD(b.last) +
-    ') · windows: ' + W.map(w => w.label).join(', ') + ' · each day covers the 24 h before 08:30' +
-    (DATA.hasTemps ? ' · bars: minutes of heating (left axis) · line: temperature (°C, right axis) at the start of each window / averaged over the 24 h, large black dots and a bold black line where the heating ran, small grey dots and a light grey line where it did not' : '') +
-    (state.units === 'pct' ? ' · 100% = the full window (' + W.map(w => w.label + ' = ' + w.len + ' min').join(', ') + '); daily total 100% = ' + SUM_LEN + ' min' : '');
   syncInputs();
 }
 
@@ -510,7 +508,7 @@ function barGeom(m, st){
   const spans = m.day ? curSpans.d : curSpans.w, cap = m.day ? DAY : 5.8 * HOUR;
   const w = spans.map(sp => Math.min(Math.max(sp * 0.92, st.minMs * m.n), cap));
   if (m.n === 1) return { width: w, offset: w.map(x => -x / 2) };
-  return { width: w.map(x => x * 0.47), offset: w.map(x => m.idx === 0 ? -x / 2 : x * 0.03) };   // two profiles side by side
+  return { width: w.map(x => x * 0.47), offset: w.map(x => m.idx === 0 ? -x / 2 : x * 0.03) };   // standard and unbiased side by side
 }
 function applyStyle(t, st){
   const m = t.meta || {};
@@ -583,10 +581,12 @@ function wireSeg(id, key){
   btns.forEach(btn => btn.addEventListener('click', () => {
     state[key] = btn.getAttribute('data-v');
     btns.forEach(x => x.setAttribute('aria-pressed', String(x === btn)));
+    renderLatest();
     render(false);
   }));
 }
-wireSeg('profile', 'profile');
+$('unb').checked = false;
+$('unb').addEventListener('change', () => { state.unbiased = $('unb').checked; renderLatest(); render(false); });
 wireSeg('units', 'units');
 $('from').addEventListener('change', applyDates);
 $('to').addEventListener('change', applyDates);
