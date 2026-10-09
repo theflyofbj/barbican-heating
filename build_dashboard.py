@@ -210,14 +210,10 @@ TEMPLATE = r'''<!doctype html>
 <title>Barbican Underfloor Heating</title>
 <style>
 :root{
-  --bg:#ffffff; --fg:#1d2433; --muted:#5d667a; --line:#d9dde6; --panel:#f4f5f8;
-  --accent:#2f66d0; --on-accent:#ffffff; --u:#3a6fd8; --a:#e8741a; --t:#8fb0d9;
-}
-@media (prefers-color-scheme: dark){
-  :root{
-    --bg:#14171f; --fg:#e8eaf0; --muted:#9aa3b5; --line:#2c3243; --panel:#1c212c;
-    --accent:#6c9aff; --on-accent:#0d1220; --u:#6c9aff; --a:#ff9a4d; --t:#4d6a94;
-  }
+  color-scheme:light;
+  --bg:#ffffff; --fg:#1f2937; --muted:#5b6472; --line:#e4e7ec; --panel:#f6f7f9;
+  --accent:#1f3a5f; --on-accent:#ffffff;
+  --u:#3f7fcf; --a:#ee8a24; --on:#111111; --off:#9aa1ad; --offline:#d3d7de;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -315,7 +311,7 @@ const wholeRange = S => { const b = bounds(S); return [stamp(b.first - 12*HOUR),
 function build(){
   const S = getSeason(), pct = state.units === 'pct';
   const showU = state.profile !== 'Adjusted', showA = state.profile !== 'Unbiased', both = showU && showA;
-  const cu = css('--u'), ca = css('--a'), ct = css('--t');
+  const cu = css('--u'), ca = css('--a'), con = css('--on'), coff = css('--off'), coffl = css('--offline');
   const val = (m, len) => pct ? 100 * m / len : m;
 
   // ---- hover texts (minutes view / percentage view)
@@ -329,96 +325,117 @@ function build(){
       W.map((w, k) => w.label + ': %{customdata[' + (4 + k) + ']} min').join('<br>') + '<extra>%{fullData.name}</extra>';
 
   const hasT = DATA.hasTemps, nW = W.length, iT = 1 + 2 * nW;   // row = [date, U x nW, A x nW, temp at window start x nW, mean temp over the 24 h]
+  // heating counts as "on" for the profile(s) shown
+  const onFn = (u, a) => both ? (u > 0 || a > 0) : (showA ? a > 0 : u > 0);
+  const stateTxt = (u, a) => !onFn(u, a) ? 'Heating off'
+    : 'Heating on: ' + (both ? 'Unbiased ' + u + ' min · Adjusted ' + a + ' min' : (showA ? 'Adjusted ' + a + ' min' : 'Unbiased ' + u + ' min'));
 
-  // ---- windows: temperature at the window start as a bar spanning the window (behind); heating minutes as dots joined by lines
-  const bx = [], bw = [], bt = [], bcd = [], bxm = [], dbxm = [];
-  const lx = [], lu = [], la = [], lcU = [], lcA = [];
-  let prev = null;
+  // ---- windows: heating minutes as bars (zero = no bar); temperature at the window start as a line, grey/red by heating off/on
+  const wb = { c: [], span: [], u: [], a: [], cdU: [], cdA: [] }, wp = [];
   S.rows.forEach(r => {
     const d0 = ms(r[0]);
-    if (prev !== null && d0 - prev > DAY) { lx.push(stamp((prev + d0) / 2)); lu.push(null); la.push(null); lcU.push([]); lcA.push([]); }  // missing days = a break
-    prev = d0;
     W.forEach((w, k) => {
       const s = d0 + w.startOff * DAY + hmMs(w.start), e = d0 + w.endOff * DAY + hmMs(w.end);
       const sameDay = dstr(s) === dstr(e);
       const when = niceT(s) + ' → ' + (sameDay ? hhmm(e) : niceT(e));
-      const mid = stamp((s + e) / 2);
-      bxm.push((s + e) / 2); bx.push(mid); bw.push((e - s) * 0.96); bt.push(r[iT + k]); bcd.push([w.label, when]);
       const u = r[1 + k], a = r[1 + nW + k];
-      lx.push(mid); lu.push(val(u, w.len)); la.push(val(a, w.len));
-      const note = () => '';
-      lcU.push([w.label, when, w.len, Math.round(100 * u / w.len), note(), u]);
-      lcA.push([w.label, when, w.len, Math.round(100 * a / w.len), note(), a]);
+      wb.c.push(stamp((s + e) / 2)); wb.span.push(e - s);
+      wb.u.push(u > 0 ? val(u, w.len) : null); wb.a.push(a > 0 ? val(a, w.len) : null);
+      wb.cdU.push([w.label, when, w.len, Math.round(100 * u / w.len), '', u]);
+      wb.cdA.push([w.label, when, w.len, Math.round(100 * a / w.len), '', a]);
+      const tv = r[iT + k];
+      if (tv !== null && tv !== undefined) wp.push({ t: s, v: tv, on: onFn(u, a), cd: [w.label, when, stateTxt(u, a)] });
     });
   });
+  wp.sort((p, q) => p.t - q.t);
 
-  // ---- daily totals: one point per calendar day (at the 08:30 post), empty days left as gaps
+  // ---- daily totals: one bar per day covering the 24 h before the 08:30 post; empty days left out
   const bd = bounds(S), byDate = {};
   S.rows.forEach(r => { byDate[ms(r[0])] = r; });
-  const tx = [], tu = [], ta = [], tcU = [], tcA = [], dbx = [], dbt = [], dbc = [];
+  const db = { c: [], u: [], a: [], cdU: [], cdA: [] }, dp = [];
   const cdTot = (t, tot, ws) => [niceD(t), (tot / 60).toFixed(1), tot, Math.round(100 * tot / SUM_LEN)]
     .concat(ws, ws.map((m, k) => Math.round(100 * m / W[k].len)));
   for (let t = bd.first; t <= bd.last; t += DAY) {
-    tx.push(stamp(t + 8*HOUR + 30*MIN));
     const r = byDate[t];
-    if (r) {
-      const uw = r.slice(1, 1 + nW), aw = r.slice(1 + nW, 1 + 2*nW);
-      const ut = sum(uw), at = sum(aw);
-      tu.push(val(ut, SUM_LEN)); ta.push(val(at, SUM_LEN));
-      tcU.push(cdTot(t, ut, uw)); tcA.push(cdTot(t, at, aw));
-      dbxm.push(t - 3*HOUR - 30*MIN); dbx.push(stamp(t - 3*HOUR - 30*MIN)); dbt.push(r[iT + nW]); dbc.push([niceD(t)]);   // the 24 h before 08:30 are centred on 20:30 the evening before
-    } else { tu.push(null); ta.push(null); tcU.push([]); tcA.push([]); }
+    if (!r) continue;
+    const uw = r.slice(1, 1 + nW), aw = r.slice(1 + nW, 1 + 2*nW), ut = sum(uw), at = sum(aw);
+    const c = t - 3*HOUR - 30*MIN;                     // the 24 h before 08:30 are centred on 20:30 the evening before
+    db.c.push(stamp(c)); db.u.push(ut > 0 ? val(ut, SUM_LEN) : null); db.a.push(at > 0 ? val(at, SUM_LEN) : null);
+    db.cdU.push(cdTot(t, ut, uw)); db.cdA.push(cdTot(t, at, aw));
+    const tv = r[iT + nW];
+    if (tv !== null && tv !== undefined) dp.push({ t: c, v: tv, on: onFn(ut, at), cd: [niceD(t), stateTxt(ut, at)] });
   }
-  const tRange = vals => {   // temperature axis: exactly the coldest to warmest reading of the season shown, plus 1 degree each side
-    const v = vals.filter(x => x !== null && x !== undefined);
+  curSpans = { w: wb.span, d: db.c.map(() => DAY) };
+
+  const tRange = pts => {   // temperature axis: exactly the coldest to warmest reading shown, plus 1 degree each side
+    const v = pts.map(p => p.v);
     if (!v.length) return undefined;
     return [Math.floor(Math.min.apply(null, v)) - 1, Math.ceil(Math.max.apply(null, v)) + 1];
   };
-  const trW = tRange(bt), trD = tRange(dbt);
-  const HT_TW = '<b>%{customdata[0]} window</b><br>%{customdata[1]}<br>Temperature at the start of the window: <b>%{y:.1f} °C</b><extra></extra>';
-  const HT_TD = '<b>%{customdata[0]}</b><br>Average temperature over the 24 h before 08:30: <b>%{y:.1f} °C</b><extra></extra>';
+  const trW = tRange(wp), trD = tRange(dp);
+  const HT_TW = '<b>%{customdata[0]} window</b><br>%{customdata[1]}<br>Temperature at the start of the window: <b>%{y:.1f} °C</b><br>%{customdata[2]}<extra></extra>';
+  const HT_TD = '<b>%{customdata[0]}</b><br>Average temperature over the 24 h before 08:30: <b>%{y:.1f} °C</b><br>%{customdata[1]}<extra></extra>';
 
-  const data = [];
+  // temperature line: each stretch takes the colour of the point it starts from (heating on / off in that window or day)
+  const segs = (pts, gap) => {
+    const on = { x: [], y: [] }, off = { x: [], y: [] };
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const p = pts[i], q = pts[i + 1];
+      if (q.t - p.t > gap) continue;                         // missing days = a break
+      const o = p.on ? on : off;
+      o.x.push(stamp(p.t), stamp(q.t), null); o.y.push(p.v, q.v, null);
+    }
+    return { on: on, off: off };
+  };
+  const lineTr = (name, grp, col, sg, show, xa, ya, on) => ({ type: 'scatter', mode: 'lines', name: name, legendgroup: grp, showlegend: show,
+    x: sg.x, y: sg.y, line: { color: col, width: 1.4 }, hoverinfo: 'skip', connectgaps: false, xaxis: xa, yaxis: ya, meta: { kind: 'tline', on: on } });
+  const ptTr = (grp, col, pts, ht, xa, ya, on) => ({ type: 'scatter', mode: 'markers', name: grp, legendgroup: grp, showlegend: false,
+    x: pts.map(p => stamp(p.t)), y: pts.map(p => p.v), customdata: pts.map(p => p.cd),
+    marker: { color: col, size: 4, line: { width: 0 } }, hovertemplate: ht, xaxis: xa, yaxis: ya, meta: { kind: 'tpt', on: on } });
+  const barTr = (name, grp, col, x, y, cd, ht, xa, ya, day, idx, n, show) => ({ type: 'bar', name: name, legendgroup: grp, showlegend: show,
+    x: x, y: y, customdata: cd, marker: { color: col, opacity: 0.9, line: { width: 0 } }, hovertemplate: ht, xaxis: xa, yaxis: ya,
+    meta: { kind: 'bar', day: day, idx: idx, n: n } });
+
+  const nSer = both ? 2 : 1, data = [];
+  if (showU) data.push(barTr('Unbiased', 'U', cu, wb.c, wb.u, wb.cdU, HT_WIN, 'x', 'y', false, 0, nSer, true));
+  if (showA) data.push(barTr('Adjusted', 'A', ca, wb.c, wb.a, wb.cdA, HT_WIN, 'x', 'y', false, showU ? 1 : 0, nSer, true));
+  if (showU) data.push(barTr('Unbiased', 'U', cu, db.c, db.u, db.cdU, HT_TOT, 'x2', 'y2', true, 0, nSer, false));
+  if (showA) data.push(barTr('Adjusted', 'A', ca, db.c, db.a, db.cdA, HT_TOT, 'x2', 'y2', true, showU ? 1 : 0, nSer, false));
   if (hasT) {
-    data.push({ type: 'bar', name: 'Temperature at window start', legendgroup: 'T', x: bx, y: bt, width: bw, customdata: bcd,
-      marker: { color: ct, opacity: 0.55 }, hovertemplate: HT_TW, xaxis: 'x', yaxis: 'y' });
-    data.push({ type: 'bar', name: 'Average temperature (24 h)', legendgroup: 'T', showlegend: true, x: dbx, y: dbt, width: dbx.map(() => DAY * 0.92), customdata: dbc,
-      marker: { color: ct, opacity: 0.55 }, hovertemplate: HT_TD, xaxis: 'x2', yaxis: 'y2' });
+    const sw = segs(wp, 20*HOUR), sd = segs(dp, 36*HOUR);
+    data.push(lineTr('Temperature, heating on', 'Ton', con, sw.on, true, 'x', 'y3', true));
+    data.push(lineTr('Temperature, heating off', 'Toff', coffl, sw.off, true, 'x', 'y3', false));
+    data.push(lineTr('Temperature, heating on', 'Ton', con, sd.on, false, 'x2', 'y4', true));
+    data.push(lineTr('Temperature, heating off', 'Toff', coffl, sd.off, false, 'x2', 'y4', false));
+    data.push(ptTr('Toff', coff, wp.filter(p => !p.on), HT_TW, 'x', 'y3', false));
+    data.push(ptTr('Ton', con, wp.filter(p => p.on), HT_TW, 'x', 'y3', true));
+    data.push(ptTr('Toff', coff, dp.filter(p => !p.on), HT_TD, 'x2', 'y4', false));
+    data.push(ptTr('Ton', con, dp.filter(p => p.on), HT_TD, 'x2', 'y4', true));
   }
-  if (showU) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Unbiased', legendgroup: 'U', x: lx, y: lu, customdata: lcU, connectgaps: false,
-      line: { color: cu, width: 1.2 }, marker: { size: 6, color: cu }, hovertemplate: HT_WIN, xaxis: 'x', yaxis: 'y3' });
-  if (showA) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Adjusted', legendgroup: 'A', x: lx, y: la, customdata: lcA, connectgaps: false,
-      line: { color: ca, width: 1.2 }, marker: { size: 6, color: ca }, hovertemplate: HT_WIN, xaxis: 'x', yaxis: 'y3' });
-  if (showU) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Unbiased', legendgroup: 'U', showlegend: false,
-      x: tx, y: tu, customdata: tcU, connectgaps: false, line: { color: cu, width: 2.2 }, marker: { size: 5, color: cu },
-      hovertemplate: HT_TOT, xaxis: 'x2', yaxis: 'y4' });
-  if (showA) data.push({ type: 'scatter', mode: 'lines+markers', name: 'Adjusted', legendgroup: 'A', showlegend: false,
-      x: tx, y: ta, customdata: tcA, connectgaps: false, line: { color: ca, width: 1.8 }, marker: { size: 5, color: ca },
-      hovertemplate: HT_TOT, xaxis: 'x2', yaxis: 'y4' });
 
   const fg = css('--fg'), grid = css('--line'), panel = css('--panel');
   const D1 = [0.42, 1], D2 = [0.07, 0.34];
-  // temperature axes (right) sit underneath; the heating axes (left) overlay them so the dots draw over the bars
-  const tAxis = (dom, anchor, rng, title) => ({ domain: dom, anchor: anchor, side: 'right', range: rng, visible: hasT, showgrid: false,
-    zeroline: !!(rng && rng[0] < 0), zerolinecolor: grid, fixedrange: true, ticksuffix: ' °C', title: { text: title } });
+  // heating axes (left, bars) are the base; the temperature axes (right) overlay them so the line draws over the bars
+  const tAxis = (dom, anchor, over, rng, title) => ({ domain: dom, anchor: anchor, overlaying: over, side: 'right', range: rng, visible: hasT, showgrid: false,
+    zeroline: !!(rng && rng[0] < 0), zerolinecolor: '#9db4d6', zerolinewidth: 1, fixedrange: true, ticksuffix: ' °C', title: { text: title } });
+  const hAxis = (dom, anchor, title) => ({ domain: dom, anchor: anchor, side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
+    title: { text: title }, ticksuffix: pct ? '%' : '' });
   const layout = {
     uirevision: state.season + '|' + state.profile + '|' + state.units,
-    barmode: 'overlay', bargap: 0, hovermode: 'closest', dragmode: 'zoom',
+    barmode: 'overlay', hovermode: 'closest', dragmode: 'zoom',
     margin: { l: 66, r: hasT ? 74 : 16, t: 36, b: 10 },
-    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    paper_bgcolor: '#ffffff', plot_bgcolor: '#ffffff',
     font: { color: fg, size: 12, family: 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif' },
-    hoverlabel: { bgcolor: panel, bordercolor: grid, font: { color: fg } },
+    hoverlabel: { bgcolor: '#ffffff', bordercolor: grid, font: { color: fg } },
     legend: { orientation: 'h', x: 0, y: 1, yanchor: 'bottom' },
     xaxis: { type: 'date', anchor: 'y', gridcolor: grid, linecolor: grid, showticklabels: false },
     xaxis2: { type: 'date', anchor: 'y2', matches: 'x', gridcolor: grid, linecolor: grid },
-    yaxis: tAxis(D1, 'x', trW, 'Temperature at start of window'),
-    yaxis3: { domain: D1, anchor: 'x', overlaying: 'y', side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
-      title: { text: pct ? 'Heating as % of window length' : 'Minutes heating in window' }, ticksuffix: pct ? '%' : '' },
-    yaxis2: tAxis(D2, 'x2', trD, 'Average temp, 24 h'),
-    yaxis4: { domain: D2, anchor: 'x2', overlaying: 'y2', side: 'left', rangemode: 'tozero', gridcolor: grid, zeroline: false, fixedrange: true,
-      title: { text: pct ? 'Daily total (% of ' + SUM_LEN + ' min)' : 'Daily total (min)' }, ticksuffix: pct ? '%' : '' }
+    yaxis: hAxis(D1, 'x', pct ? 'Heating as % of window length' : 'Minutes heating in window'),
+    yaxis2: hAxis(D2, 'x2', pct ? 'Daily total (% of ' + SUM_LEN + ' min)' : 'Daily total (min)'),
+    yaxis3: tAxis(D1, 'x', 'y', trW, 'Temperature at start of window'),
+    yaxis4: tAxis(D2, 'x2', 'y2', trD, 'Average temp, 24 h')
   };
-  return { data: data, layout: layout, S: S, tv: { wx: bxm, wv: bt, dx: dbxm, dv: dbt } };
+  return { data: data, layout: layout, S: S, tv: { wx: wp.map(p => p.t), wv: wp.map(p => p.v), dx: dp.map(p => p.t), dv: dp.map(p => p.v) } };
 }
 
 function renderLatest(){
@@ -457,12 +474,12 @@ function render(reset){
   const keep = (!reset && gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range) ? gd._fullLayout.xaxis.range.slice() : null;
   fig.layout.xaxis.range = keep || wholeRange(fig.S);
   curTV = fig.tv;
-  const st = dotStyle(fig.layout.xaxis.range);   // thin lines when many days are shown
-  fig.data.forEach(t => { if (t.yaxis === 'y3') { t.line.width = st.width; t.marker.size = st.size; } });
-  curStyle = st.width + '|' + st.size;
+  const st = styleFor(fig.layout.xaxis.range);   // bar widths, line widths and dot sizes follow the zoom level
+  fig.data.forEach(t => applyStyle(t, st));
+  curStyle = st.key;
   const fit = tempFit(fig.layout.xaxis.range);   // temperature axes follow the dates on screen
-  if (fit && fit.w) fig.layout.yaxis.range = fit.w;
-  if (fit && fit.d) fig.layout.yaxis2.range = fit.d;
+  if (fit && fit.w) fig.layout.yaxis3.range = fit.w;
+  if (fit && fit.d) fig.layout.yaxis4.range = fit.d;
   const cfg = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] };
   if (reset) {
     // a fresh plot per season, so "Reset axes" / double-click return to THIS season's full range
@@ -473,29 +490,46 @@ function render(reset){
   const b = bounds(fig.S);
   $('sub').textContent = fig.S.label + ' heating season · ' + fig.S.rows.length + ' days of data (' + niceD(b.first) + ' to ' + niceD(b.last) +
     ') · windows: ' + W.map(w => w.label).join(', ') + ' · each day covers the 24 h before 08:30' +
-    (DATA.hasTemps ? ' · grey-blue bars: temperature (°C, right axis) at the start of each window / averaged over the 24 h' : '') +
+    (DATA.hasTemps ? ' · bars: minutes of heating (left axis) · line: temperature (°C, right axis) at the start of each window / averaged over the 24 h, large black dots and a bold black line where the heating ran, small grey dots and a light grey line where it did not' : '') +
     (state.units === 'pct' ? ' · 100% = the full window (' + W.map(w => w.label + ' = ' + w.len + ' min').join(', ') + '); daily total 100% = ' + SUM_LEN + ' min' : '');
   syncInputs();
 }
 
-let curTV = null, curStyle = '';
-// Dots and joining lines are always drawn. With more than a month on screen the lines get much thinner
-// (and the dots smaller as more days are shown), so a whole season stays readable.
-function dotStyle(xr){
+let curTV = null, curStyle = '', curSpans = { w: [], d: [] };
+// Bars are drawn at least 2 px wide (so a whole season stays visible) and never wider than their slot; lines get thinner
+// and dots smaller as more days are shown.
+function styleFor(xr){
   const el = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis._length;
   const w = el || Math.max(300, gd.clientWidth - 140);
   const days = Math.max(1, (axisMs(xr[1]) - axisMs(xr[0])) / DAY), ppd = w / days;   // days on screen, pixels per day
-  return { width: days > 31 ? 0.35 : 1.2, size: ppd < 6 ? 3 : (ppd < 24 ? 4 : 6) };
+  const st = { lw: days > 31 ? 0.9 : 1.6, msz: ppd < 8 ? 2.5 : (ppd < 24 ? 3.5 : 5), minMs: 1.5 * DAY / ppd };
+  st.key = st.lw + '|' + st.msz + '|' + Math.round(st.minMs / (0.25 * HOUR));
+  return st;
 }
-function restyleDots(){
+function barGeom(m, st){
+  const spans = m.day ? curSpans.d : curSpans.w, cap = m.day ? DAY : 5.8 * HOUR;
+  const w = spans.map(sp => Math.min(Math.max(sp * 0.92, st.minMs * m.n), cap));
+  if (m.n === 1) return { width: w, offset: w.map(x => -x / 2) };
+  return { width: w.map(x => x * 0.47), offset: w.map(x => m.idx === 0 ? -x / 2 : x * 0.03) };   // two profiles side by side
+}
+function applyStyle(t, st){
+  const m = t.meta || {};
+  if (m.kind === 'tline') t.line.width = m.on ? st.lw * 1.5 : st.lw * 0.8;
+  else if (m.kind === 'tpt') t.marker.size = m.on ? st.msz + 1.5 : Math.max(1.5, st.msz - 1);
+  else if (m.kind === 'bar') { const g = barGeom(m, st); t.width = g.width; t.offset = g.offset; }
+}
+function restyleAll(){
   const xr = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range;
   if (!xr || !gd.data) return;
-  const st = dotStyle(xr), key = st.width + '|' + st.size;
-  if (key === curStyle) return;
-  curStyle = key;
-  const idx = [];
-  gd.data.forEach((t, i) => { if (t.yaxis === 'y3') idx.push(i); });
-  if (idx.length) Plotly.restyle(gd, { 'line.width': st.width, 'marker.size': st.size }, idx);
+  const st = styleFor(xr);
+  if (st.key === curStyle) return;
+  curStyle = st.key;
+  gd.data.forEach((t, i) => {
+    const m = t.meta || {};
+    if (m.kind === 'tline') Plotly.restyle(gd, { 'line.width': m.on ? st.lw * 1.5 : st.lw * 0.8 }, [i]);
+    else if (m.kind === 'tpt') Plotly.restyle(gd, { 'marker.size': m.on ? st.msz + 1.5 : Math.max(1.5, st.msz - 1) }, [i]);
+    else if (m.kind === 'bar') { const g = barGeom(m, st); Plotly.restyle(gd, { width: [g.width], offset: [g.offset] }, [i]); }
+  });
 }
 function fitOne(xs, vs, a, b){
   let lo = Infinity, hi = -Infinity;
@@ -514,13 +548,13 @@ function onRelayout(ev){
   syncInputs();
   if (!ev || !Object.keys(ev).some(k => k.indexOf('xaxis') === 0)) return;   // our own y-axis updates must not loop
   const fit = tempFit(gd._fullLayout.xaxis.range), upd = {};
-  if (fit && fit.w) upd['yaxis.range'] = fit.w;
-  if (fit && fit.d) upd['yaxis2.range'] = fit.d;
+  if (fit && fit.w) upd['yaxis3.range'] = fit.w;
+  if (fit && fit.d) upd['yaxis4.range'] = fit.d;
   if (Object.keys(upd).length) Plotly.relayout(gd, upd);
-  restyleDots();
+  restyleAll();
 }
 let rsz = null;
-window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(restyleDots, 250); });
+window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(restyleAll, 250); });
 
 function syncInputs(){
   const r = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range;
@@ -556,7 +590,6 @@ wireSeg('profile', 'profile');
 wireSeg('units', 'units');
 $('from').addEventListener('change', applyDates);
 $('to').addEventListener('change', applyDates);
-if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => render(false));
 
 $('foot').textContent = 'Source: Barbican Underfloor Heating blog (Atom feed) · data through ' + DATA.dataThrough + (DATA.hasTemps ? ' · temperatures: Open-Meteo, to ' + DATA.tempThrough : '') +
   ' · page built ' + DATA.built +
