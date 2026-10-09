@@ -2,7 +2,7 @@ name: Update dashboard
 
 on:
   schedule:
-    - cron: "20 9 * * *"     # every day at 09:20 UTC, i.e. after the 08:30 London post
+    - cron: "31 8 * * *"     # every day at 09:20 UTC, i.e. after the 08:30 London post
   workflow_dispatch:          # lets you also run it by hand from the Actions tab
 
 permissions:
