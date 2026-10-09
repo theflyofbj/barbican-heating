@@ -2,7 +2,10 @@ name: Update dashboard
 
 on:
   schedule:
-    - cron: "35 8 * * *"     # every day at 09:20 UTC, i.e. after the 08:30 London post
+    # GitHub schedules are always in UTC, so London time moves by an hour with the clocks.
+    # The blog posts at 08:30 London time (00:30 Pacific). These runs are 08:35 London in summer (07:35 UTC)
+    # and 08:35 London in winter (08:35 UTC); the 10:35 UTC run catches a late post. A run with nothing new does nothing.
+    - cron: "35 7,8,10 * * *"
   workflow_dispatch:          # lets you also run it by hand from the Actions tab
 
 permissions:
