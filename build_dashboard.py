@@ -315,7 +315,13 @@ const wholeRange = S => { const b = bounds(S); return [stamp(b.first - 12*HOUR),
 function build(){
   const S = getSeason(), pct = state.units === 'pct';
   const showU = state.unbiased, showA = true, both = showU;     // the standard figures are always shown; unbiased only when ticked
-  const cu = css('--u'), ca = css('--a'), con = css('--on'), coff = css('--off'), coffl = css('--offline');
+  // one colour per window (the same in every row of the upper plot); the unbiased bars use a lighter shade of it.
+  // The daily totals below use their own colour so they cannot be mistaken for any one window.
+  const WCOL = { '13:00': '#f0b429', '20:30': '#d8512e', '02:30': '#3f7fcf' }, FALL = ['#f0b429', '#d8512e', '#3f7fcf', '#7a5cc7'];
+  const tint = (hex, f) => { const n = parseInt(hex.slice(1), 16); return 'rgb(' + [n >> 16, (n >> 8) & 255, n & 255].map(c => Math.round(c + (255 - c) * f)).join(',') + ')'; };
+  const wcol = W.map((w, k) => WCOL[w.start] || FALL[k % FALL.length]);
+  const DCOL = '#1f8a70';
+  const con = css('--on'), coff = css('--off'), coffl = css('--offline');
   const val = (m, len) => pct ? 100 * m / len : m;
 
   // ---- hover texts (minutes view / percentage view)
@@ -334,7 +340,7 @@ function build(){
   const stateTxt = (u, a) => (a > 0 ? 'Heating on: ' + a + ' min' : 'Heating off') + (showU ? ' · unbiased ' + u + ' min' : '');
 
   // ---- windows: heating minutes as bars (zero = no bar); temperature at the window start as a line, grey/red by heating off/on
-  const wb = { c: [], span: [], u: [], a: [], cdU: [], cdA: [] }, wp = [];
+  const wb = { c: [], span: [], u: [], a: [], cdU: [], cdA: [], k: [] }, wp = [];
   S.rows.forEach(r => {
     const d0 = ms(r[0]);
     W.forEach((w, k) => {
@@ -342,7 +348,7 @@ function build(){
       const sameDay = dstr(s) === dstr(e);
       const when = niceT(s) + ' → ' + (sameDay ? hhmm(e) : niceT(e));
       const u = r[1 + k], a = r[1 + nW + k];
-      wb.c.push(stamp((s + e) / 2)); wb.span.push(e - s);
+      wb.c.push(stamp((s + e) / 2)); wb.span.push(e - s); wb.k.push(k);
       wb.u.push(u > 0 ? val(u, w.len) : null); wb.a.push(a > 0 ? val(a, w.len) : null);
       wb.cdU.push([w.label, when, w.len, Math.round(100 * u / w.len), '', u]);
       wb.cdA.push([w.label, when, w.len, Math.round(100 * a / w.len), '', a]);
@@ -400,15 +406,18 @@ function build(){
   const ptTr = (grp, col, pts, ht, xa, ya, on) => ({ type: 'scatter', mode: 'markers', name: grp, legendgroup: grp, showlegend: false,
     x: pts.map(p => stamp(p.t)), y: pts.map(p => p.v), customdata: pts.map(p => p.cd),
     marker: { color: col, size: 4, line: { width: 0 } }, hovertemplate: ht, xaxis: xa, yaxis: ya, meta: { kind: 'tpt', on: on, day: xa === 'x2' } });
-  const barTr = (name, grp, col, x, y, cd, ht, xa, ya, day, idx, n, show) => ({ type: 'bar', name: name, legendgroup: grp, showlegend: show,
+  const barTr = (name, grp, col, x, y, cd, ht, xa, ya, day, idx, n, show) => ({ type: 'bar', name: name, legendgroup: grp, showlegend: false,
     x: x, y: y, customdata: cd, marker: { color: col, opacity: 0.9, line: { width: 0 } }, hovertemplate: ht, xaxis: xa, yaxis: ya,
     meta: { kind: 'bar', day: day, idx: idx, n: n } });
 
   const nSer = both ? 2 : 1, data = [];
-  data.push(barTr('Heating', 'A', ca, wb.c, wb.a, wb.cdA, HT_WIN, 'x', 'y', false, 0, nSer, true));
-  if (showU) data.push(barTr('Unbiased', 'U', cu, wb.c, wb.u, wb.cdU, HT_WIN, 'x', 'y', false, 1, nSer, true));
-  data.push(barTr('Heating', 'A', ca, db.c, db.a, db.cdA, HT_TOT, 'x2', 'y2', true, 0, nSer, false));
-  if (showU) data.push(barTr('Unbiased', 'U', cu, db.c, db.u, db.cdU, HT_TOT, 'x2', 'y2', true, 1, nSer, false));
+  // legend: one swatch per window (empty traces, only there to label the colours)
+  W.forEach((w, k) => data.push({ type: 'scatter', mode: 'markers', name: w.label, legendgroup: 'W' + k, showlegend: true, x: [null], y: [null], marker: { color: wcol[k], symbol: 'square', size: 11 }, hoverinfo: 'skip', xaxis: 'x', yaxis: 'y' }));
+  if (showU) data.push({ type: 'scatter', mode: 'markers', name: 'Unbiased (lighter shade)', legendgroup: 'U', showlegend: true, x: [null], y: [null], marker: { color: tint('#7b8494', 0.55), symbol: 'square', size: 11 }, hoverinfo: 'skip', xaxis: 'x', yaxis: 'y' });
+  data.push(barTr('Heating', 'A', wb.k.map(k => wcol[k]), wb.c, wb.a, wb.cdA, HT_WIN, 'x', 'y', false, 0, nSer, true));
+  if (showU) data.push(barTr('Unbiased', 'U', wb.k.map(k => tint(wcol[k], 0.55)), wb.c, wb.u, wb.cdU, HT_WIN, 'x', 'y', false, 1, nSer, true));
+  data.push(barTr('Heating', 'A', DCOL, db.c, db.a, db.cdA, HT_TOT, 'x2', 'y2', true, 0, nSer, false));
+  if (showU) data.push(barTr('Unbiased', 'U', tint(DCOL, 0.55), db.c, db.u, db.cdU, HT_TOT, 'x2', 'y2', true, 1, nSer, false));
   if (hasT) {
     const sw = segs(wp, 20*HOUR), sd = segs(dp, 36*HOUR);
     data.push(lineTr('Temperature, heating on', 'Ton', con, sw.on, true, 'x', 'y3', true));
