@@ -411,9 +411,10 @@ function build(){
     meta: { kind: 'bar', day: day, idx: idx, n: n } });
 
   const nSer = both ? 2 : 1, data = [];
+  const bd0 = bounds(S);
   // legend: one swatch per window (empty traces, only there to label the colours)
-  W.forEach((w, k) => data.push({ type: 'scatter', mode: 'markers', name: w.label, legendgroup: 'W' + k, showlegend: true, x: [null], y: [null], marker: { color: wcol[k], symbol: 'square', size: 11 }, hoverinfo: 'skip', xaxis: 'x', yaxis: 'y' }));
-  if (showU) data.push({ type: 'scatter', mode: 'markers', name: 'Unbiased (lighter shade)', legendgroup: 'U', showlegend: true, x: [null], y: [null], marker: { color: tint('#7b8494', 0.55), symbol: 'square', size: 11 }, hoverinfo: 'skip', xaxis: 'x', yaxis: 'y' });
+  W.forEach((w, k) => data.push({ type: 'scatter', mode: 'markers', name: w.label, legendgroup: 'W' + k, showlegend: true, x: [stamp(bd0.first)], y: [null], marker: { color: wcol[k], symbol: 'square', size: 11 }, hoverinfo: 'skip', xaxis: 'x', yaxis: 'y' }));
+  if (showU) data.push({ type: 'scatter', mode: 'markers', name: 'Unbiased (lighter shade)', legendgroup: 'U', showlegend: true, x: [stamp(bd0.first)], y: [null], marker: { color: tint('#7b8494', 0.55), symbol: 'square', size: 11 }, hoverinfo: 'skip', xaxis: 'x', yaxis: 'y' });
   data.push(barTr('Heating', 'A', wb.k.map(k => wcol[k]), wb.c, wb.a, wb.cdA, HT_WIN, 'x', 'y', false, 0, nSer, true));
   if (showU) data.push(barTr('Unbiased', 'U', wb.k.map(k => tint(wcol[k], 0.55)), wb.c, wb.u, wb.cdU, HT_WIN, 'x', 'y', false, 1, nSer, true));
   data.push(barTr('Heating', 'A', DCOL, db.c, db.a, db.cdA, HT_TOT, 'x2', 'y2', true, 0, nSer, false));
