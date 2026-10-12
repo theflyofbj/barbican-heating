@@ -484,7 +484,7 @@ function renderLatest(){
   const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + amt(w.a, w.len) + '</td>' + (inc ? '<td>' + amt(w.u, w.len) + '</td>' : '')
     + (DATA.hasTemps ? '<td>' + deg(w.t) + '</td>' : '') + '</tr>').join('');
   const notes = (age > 2 ? ['the latest data is ' + age + ' days old'] : []).concat(L.inSeason ? [] : ['outside the Oct–Apr season, so not in the charts below']);
-  el.innerHTML = '<h2 id="latest-h">Heating in the last 24 hours <b class="rng">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN) + '</b></h2>'
+  el.innerHTML = '<h2 id="latest-h">Heating in the last 24 hours <b class="rng">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' to ' + niceT(dayT + 8*HOUR + 30*MIN) + '</b></h2>'
     + (notes.length ? '<p class="when"><span class="warn">' + notes.join(' · ') + '</span></p>' : '')
     + '<p>' + parts.join(' ') + '</p><div class="tiles">' + tiles.join('') + '</div>'
     + '<table><thead><tr><th>Window</th><th>Heating</th>' + (inc ? '<th>Unbiased</th>' : '') + (DATA.hasTemps ? '<th>Temp at start</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
