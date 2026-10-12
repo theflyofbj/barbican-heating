@@ -139,6 +139,13 @@ def day_temps(d, wdefs, times, temps):
     return out
 
 
+def end_temps(d, wdefs, times, temps):
+    """Temperature at the end of each window of post day d."""
+    base = datetime.combine(d, datetime.min.time())
+    return [temp_at(times, temps, base + timedelta(days=w["endOff"], hours=int(w["end"][:2]), minutes=int(w["end"][3:])))
+            for w in wdefs]
+
+
 def latest_summary(days, window_keys, wdefs, times, temps):
     """The most recent post (whatever the month), the day before it, and the average of the 7 days before."""
     def tot(d, p):
@@ -183,6 +190,7 @@ def build_payload(csv_path, temp_path=None, temp_tz="UTC"):
         for p in PROFILES:
             row += [num(days[d][p][k]) for k in window_keys]  # raises KeyError if a window is missing
         row += day_temps(d, wdefs, times, temps)  # temperature at the start of each window, then the 24 h average
+        row += end_temps(d, wdefs, times, temps)  # then the temperature at the end of each window
         seasons.setdefault(y, []).append(row)
     payload = {
         "windows": wdefs,
@@ -319,7 +327,7 @@ function build(){
     : '<b>%{customdata[0]}</b><br>Total <b>%{customdata[2]} min</b> (%{customdata[1]} h)<br>' +
       W.map((w, k) => w.label + ': %{customdata[' + (4 + k) + ']} min').join('<br>') + '<extra>%{fullData.name}</extra>';
 
-  const hasT = DATA.hasTemps, nW = W.length, iT = 1 + 2 * nW;   // row = [date, U x nW, A x nW, temp at window start x nW, mean temp over the 24 h]
+  const hasT = DATA.hasTemps, nW = W.length, iT = 1 + 2 * nW;   // row = [date, U x nW, A x nW, temp at window start x nW, mean temp over the 24 h, temp at window end x nW]
   // "heating on" always refers to the standard figures, so the temperature line does not change when unbiased data is added
   const onFn = (u, a) => a > 0;
   const stateTxt = (u, a) => (a > 0 ? 'Heating on: ' + a + ' min' : 'Heating off') + (showU ? ' · unbiased ' + u + ' min' : '');
@@ -338,7 +346,11 @@ function build(){
       wb.cdU.push([w.label, when, w.len, Math.round(100 * u / w.len), '', u]);
       wb.cdA.push([w.label, when, w.len, Math.round(100 * a / w.len), '', a]);
       const tv = r[iT + k];
-      if (tv !== null && tv !== undefined) wp.push({ t: s, v: tv, on: onFn(u, a), cd: [w.label, when, stateTxt(u, a)] });
+      const te = r[iT + nW + 1 + k], ok = x => x !== null && x !== undefined;
+      if (ok(tv) || ok(te)) {
+        const f = x => x.toFixed(1), tx = ok(tv) && ok(te) ? 'start ' + f(tv) + ' °C → end ' + f(te) + ' °C' : f(ok(tv) ? tv : te) + ' °C (' + (ok(tv) ? 'start' : 'end') + ' of window)';
+        wp.push({ t: s, c: (s + e) / 2, span: e - s, v: ok(tv) ? tv : null, ve: ok(te) ? te : null, on: onFn(u, a), cd: [w.label, when, stateTxt(u, a), tx] });
+      }
     });
   });
   wp.sort((p, q) => p.t - q.t);
@@ -366,8 +378,9 @@ function build(){
     if (!v.length) return undefined;
     return [Math.floor(Math.min.apply(null, v)) - 1, Math.ceil(Math.max.apply(null, v)) + 1];
   };
-  const trW = tRange(wp), trD = tRange(dp);
+  const trW = tRange(wp.map(p => ({ v: p.v !== null ? p.v : p.ve })).concat(wp.filter(p => p.ve !== null).map(p => ({ v: p.ve })))), trD = tRange(dp);
   const HT_TW = '<b>%{customdata[0]} window</b><br>%{customdata[1]}<br>Temperature at the start of the window: <b>%{y:.1f} °C</b><br>%{customdata[2]}<extra></extra>';
+  const HT_TWS = '<b>%{customdata[0]} window</b><br>%{customdata[1]}<br>Temperature: <b>%{customdata[3]}</b><br>%{customdata[2]}<extra></extra>';
   const HT_TD = '<b>%{customdata[0]}</b><br>Average temperature over the 24 h before 08:30: <b>%{y:.1f} °C</b><br>%{customdata[1]}<extra></extra>';
 
   // temperature line: each stretch takes the colour of the point it starts from (heating on / off in that window or day)
@@ -382,10 +395,10 @@ function build(){
     return { on: on, off: off };
   };
   const lineTr = (name, grp, col, sg, show, xa, ya, on) => ({ type: 'scatter', mode: 'lines', name: name, legendgroup: grp, showlegend: show,
-    x: sg.x, y: sg.y, line: { color: col, width: 1.4 }, hoverinfo: 'skip', connectgaps: false, xaxis: xa, yaxis: ya, meta: { kind: 'tline', on: on } });
+    x: sg.x, y: sg.y, line: { color: col, width: 1.4 }, hoverinfo: 'skip', connectgaps: false, xaxis: xa, yaxis: ya, meta: { kind: 'tline', on: on, day: xa === 'x2' } });
   const ptTr = (grp, col, pts, ht, xa, ya, on) => ({ type: 'scatter', mode: 'markers', name: grp, legendgroup: grp, showlegend: false,
     x: pts.map(p => stamp(p.t)), y: pts.map(p => p.v), customdata: pts.map(p => p.cd),
-    marker: { color: col, size: 4, line: { width: 0 } }, hovertemplate: ht, xaxis: xa, yaxis: ya, meta: { kind: 'tpt', on: on } });
+    marker: { color: col, size: 4, line: { width: 0 } }, hovertemplate: ht, xaxis: xa, yaxis: ya, meta: { kind: 'tpt', on: on, day: xa === 'x2' } });
   const barTr = (name, grp, col, x, y, cd, ht, xa, ya, day, idx, n, show) => ({ type: 'bar', name: name, legendgroup: grp, showlegend: show,
     x: x, y: y, customdata: cd, marker: { color: col, opacity: 0.9, line: { width: 0 } }, hovertemplate: ht, xaxis: xa, yaxis: ya,
     meta: { kind: 'bar', day: day, idx: idx, n: n } });
@@ -405,6 +418,11 @@ function build(){
     data.push(ptTr('Ton', con, wp.filter(p => p.on), HT_TW, 'x', 'y3', true));
     data.push(ptTr('Toff', coff, dp.filter(p => !p.on), HT_TD, 'x2', 'y4', false));
     data.push(ptTr('Ton', con, dp.filter(p => p.on), HT_TD, 'x2', 'y4', true));
+    // zoomed in: each window gets its own start-to-end line across the width of its bar (black = heating on), or one grey dot at its centre
+    data.push({ type: 'scatter', mode: 'lines+markers', name: 'Temperature, heating on', legendgroup: 'Ton', showlegend: true, x: [], y: [], connectgaps: false,
+      line: { color: con, width: 2 }, marker: { color: con, size: 5, line: { width: 0 } }, hovertemplate: HT_TWS, xaxis: 'x', yaxis: 'y3', meta: { kind: 'wseg', on: true } });
+    data.push({ type: 'scatter', mode: 'markers', name: 'Temperature, heating off', legendgroup: 'Toff', showlegend: true, x: [], y: [],
+      marker: { color: coff, size: 4, line: { width: 0 } }, hovertemplate: HT_TWS, xaxis: 'x', yaxis: 'y3', meta: { kind: 'wseg', on: false } });
   }
 
   const fg = css('--fg'), grid = css('--line'), panel = css('--panel');
@@ -429,7 +447,7 @@ function build(){
     yaxis3: tAxis(D1, 'x', 'y', trW, 'Temperature at start of window'),
     yaxis4: tAxis(D2, 'x2', 'y2', trD, 'Average temp, 24 h')
   };
-  return { data: data, layout: layout, S: S, tv: { wx: wp.map(p => p.t), wv: wp.map(p => p.v), dx: dp.map(p => p.t), dv: dp.map(p => p.v) } };
+  return { data: data, layout: layout, S: S, wp: wp, n: nSer, tv: { wx: wp.map(p => p.t), wv: wp.map(p => p.v), wxe: wp.filter(p => p.ve !== null).map(p => p.t), wve: wp.filter(p => p.ve !== null).map(p => p.ve), dx: dp.map(p => p.t), dv: dp.map(p => p.v) } };
 }
 
 function renderLatest(){
@@ -465,7 +483,7 @@ function renderLatest(){
   const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + amt(w.a, w.len) + '</td>' + (inc ? '<td>' + amt(w.u, w.len) + '</td>' : '')
     + (DATA.hasTemps ? '<td>' + deg(w.t) + '</td>' : '') + '</tr>').join('');
   el.innerHTML = '<h2 id="latest-h">Latest 24 hours · ' + niceD(dayT) + '</h2>'
-    + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN)
+    + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN) + ' (most recent blog post)'
     + (age > 2 ? ' · <span class="warn">this post is ' + age + ' days old</span>' : '')
     + (L.inSeason ? '' : ' · <span class="warn">outside the Oct–Apr season, so it is not in the charts below</span>') + '</p>'
     + '<p>' + parts.join(' ') + '</p><div class="tiles">' + tiles.join('') + '</div>'
@@ -476,7 +494,7 @@ function render(reset){
   const fig = build();
   const keep = (!reset && gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range) ? gd._fullLayout.xaxis.range.slice() : null;
   fig.layout.xaxis.range = keep || wholeRange(fig.S);
-  curTV = fig.tv;
+  curTV = fig.tv; curWP = fig.wp; curN = fig.n;
   const st = styleFor(fig.layout.xaxis.range);   // bar widths, line widths and dot sizes follow the zoom level
   fig.data.forEach(t => applyStyle(t, st));
   curStyle = st.key;
@@ -486,22 +504,22 @@ function render(reset){
   const cfg = { responsive: true, displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d'] };
   if (reset) {
     // a fresh plot per season, so "Reset axes" / double-click return to THIS season's full range
-    Plotly.newPlot(gd, fig.data, fig.layout, cfg).then(function(){ gd.on('plotly_relayout', onRelayout); });
+    Plotly.newPlot(gd, fig.data, fig.layout, cfg).then(function(){ gd.on('plotly_relayout', onRelayout); fixArrows(); });
   } else {
-    Plotly.react(gd, fig.data, fig.layout, cfg);
+    Plotly.react(gd, fig.data, fig.layout, cfg).then(fixArrows);
   }
   syncInputs();
 }
 
-let curTV = null, curStyle = '', curSpans = { w: [], d: [] };
+let curTV = null, curWP = [], curN = 1, curStyle = '', curSpans = { w: [], d: [] };
 // Bars are drawn at least 2 px wide (so a whole season stays visible) and never wider than their slot; lines get thinner
 // and dots smaller as more days are shown.
 function styleFor(xr){
   const el = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis._length;
   const w = el || Math.max(300, gd.clientWidth - 140);
   const days = Math.max(1, (axisMs(xr[1]) - axisMs(xr[0])) / DAY), ppd = w / days;   // days on screen, pixels per day
-  const st = { lw: days > 31 ? 0.9 : 1.6, msz: ppd < 8 ? 2.5 : (ppd < 24 ? 3.5 : 5), minMs: 1.5 * DAY / ppd };
-  st.key = st.lw + '|' + st.msz + '|' + Math.round(st.minMs / (0.25 * HOUR));
+  const st = { detail: days <= 31, lw: days > 31 ? 0.9 : 1.6, msz: ppd < 8 ? 2.5 : (ppd < 24 ? 3.5 : 5), minMs: 1.5 * DAY / ppd };
+  st.key = (st.detail ? 'd' : 'c') + st.lw + '|' + st.msz + '|' + Math.round(st.minMs / (0.25 * HOUR));
   return st;
 }
 function barGeom(m, st){
@@ -510,9 +528,45 @@ function barGeom(m, st){
   if (m.n === 1) return { width: w, offset: w.map(x => -x / 2) };
   return { width: w.map(x => x * 0.47), offset: w.map(x => m.idx === 0 ? -x / 2 : x * 0.03) };   // standard and unbiased side by side
 }
+// start-to-end temperature across each window's bar (heating on), or one centred dot (heating off); positions follow the bar width
+function wsegData(on, st){
+  const x = [], y = [], cd = [], sym = [], ok = v => v !== null && v !== undefined;
+  curWP.forEach(p => {
+    if (p.on !== on) return;
+    if (on && ok(p.v) && ok(p.ve)) {
+      const half = Math.min(Math.max(p.span * 0.92, st.minMs * curN), 5.8 * HOUR) * 0.45;
+      x.push(stamp(p.c - half), stamp(p.c + half), null); y.push(p.v, p.ve, null); cd.push(p.cd, p.cd, p.cd); sym.push('circle', 'arrow-wide', 'circle');
+    } else {
+      x.push(stamp(p.c)); y.push(ok(p.v) && ok(p.ve) ? (p.v + p.ve) / 2 : (ok(p.v) ? p.v : p.ve)); cd.push(p.cd); sym.push('circle');
+    }
+  });
+  return { x: x, y: y, cd: cd, sym: sym };
+}
+// arrow heads point along each line as it appears on screen, so their angle is worked out from the current pixel scales
+function arrowAngles(t){
+  const fl = gd._fullLayout, xa = fl && fl.xaxis, ya = fl && fl.yaxis3;
+  if (!xa || !ya || !ya.range) return t.x.map(() => 0);
+  const kx = xa._length / (axisMs(xa.range[1]) - axisMs(xa.range[0])), ky = ya._length / (ya.range[1] - ya.range[0]);
+  return t.x.map((x, i) => {
+    if (!i || !t.marker.symbol || t.marker.symbol[i] !== 'arrow-wide') return 0;
+    const sx = (axisMs(x) - axisMs(t.x[i - 1])) * kx, sy = -(t.y[i] - t.y[i - 1]) * ky;   // screen vector, y downwards
+    return Math.atan2(sx, -sy) * 180 / Math.PI;                                          // clockwise from "up"
+  });
+}
+function fixArrows(){
+  if (!gd.data) return;
+  gd.data.forEach((t, i) => { if (t.meta && t.meta.kind === 'wseg' && t.meta.on && t.visible !== false) Plotly.restyle(gd, { 'marker.angle': [arrowAngles(t)] }, [i]); });
+}
 function applyStyle(t, st){
   const m = t.meta || {};
-  if (m.kind === 'tline') t.line.width = m.on ? st.lw * 1.5 : st.lw * 0.8;
+  if (m.kind === 'wseg') {
+    const g = wsegData(m.on, st);
+    t.x = g.x; t.y = g.y; t.customdata = g.cd; t.visible = st.detail;
+    t.marker.size = m.on ? g.sym.map(q => q === 'arrow-wide' ? st.msz + 5 : st.msz + 1) : Math.max(2, st.msz);
+    if (m.on) { t.marker.symbol = g.sym; t.marker.angle = g.x.map(() => 0); } if (m.on) t.line.width = st.lw * 1.5;
+  }
+  else if (!m.day && (m.kind === 'tline' || m.kind === 'tpt') && st.detail) t.visible = false;
+  else if (m.kind === 'tline') t.line.width = m.on ? st.lw * 1.5 : st.lw * 0.8;
   else if (m.kind === 'tpt') t.marker.size = m.on ? st.msz + 1.5 : Math.max(1.5, st.msz - 1);
   else if (m.kind === 'bar') { const g = barGeom(m, st); t.width = g.width; t.offset = g.offset; }
 }
@@ -524,7 +578,17 @@ function restyleAll(){
   curStyle = st.key;
   gd.data.forEach((t, i) => {
     const m = t.meta || {};
-    if (m.kind === 'tline') Plotly.restyle(gd, { 'line.width': m.on ? st.lw * 1.5 : st.lw * 0.8 }, [i]);
+    if (m.kind === 'wseg') {
+      const g = wsegData(m.on, st), u = { x: [g.x], y: [g.y], customdata: [g.cd], visible: st.detail, 'marker.size': m.on ? g.sym.map(q => q === 'arrow-wide' ? st.msz + 5 : st.msz + 1) : Math.max(2, st.msz) };
+      if (m.on) { u['marker.symbol'] = [g.sym]; u['marker.angle'] = [g.x.map(() => 0)]; }
+      if (m.on) u['line.width'] = st.lw * 1.5;
+      Plotly.restyle(gd, u, [i]);
+    }
+    else if (!m.day && (m.kind === 'tline' || m.kind === 'tpt')) {
+      Plotly.restyle(gd, { visible: !st.detail }, [i]);
+      if (!st.detail) Plotly.restyle(gd, m.kind === 'tline' ? { 'line.width': m.on ? st.lw * 1.5 : st.lw * 0.8 } : { 'marker.size': m.on ? st.msz + 1.5 : Math.max(1.5, st.msz - 1) }, [i]);
+    }
+    else if (m.kind === 'tline') Plotly.restyle(gd, { 'line.width': m.on ? st.lw * 1.5 : st.lw * 0.8 }, [i]);
     else if (m.kind === 'tpt') Plotly.restyle(gd, { 'marker.size': m.on ? st.msz + 1.5 : Math.max(1.5, st.msz - 1) }, [i]);
     else if (m.kind === 'bar') { const g = barGeom(m, st); Plotly.restyle(gd, { width: [g.width], offset: [g.offset] }, [i]); }
   });
@@ -540,7 +604,8 @@ function fitOne(xs, vs, a, b){
 function tempFit(xr){
   if (!curTV || !DATA.hasTemps || !xr) return null;
   const a = axisMs(xr[0]), b = axisMs(xr[1]);
-  return { w: fitOne(curTV.wx, curTV.wv, a, b), d: fitOne(curTV.dx, curTV.dv, a, b) };
+  const det = (b - a) / DAY <= 31, wx = det ? curTV.wx.concat(curTV.wxe) : curTV.wx, wv = det ? curTV.wv.concat(curTV.wve) : curTV.wv;
+  return { w: fitOne(wx, wv, a, b), d: fitOne(curTV.dx, curTV.dv, a, b) };
 }
 function onRelayout(ev){
   syncInputs();
@@ -548,8 +613,9 @@ function onRelayout(ev){
   const fit = tempFit(gd._fullLayout.xaxis.range), upd = {};
   if (fit && fit.w) upd['yaxis3.range'] = fit.w;
   if (fit && fit.d) upd['yaxis4.range'] = fit.d;
-  if (Object.keys(upd).length) Plotly.relayout(gd, upd);
+  const done = Object.keys(upd).length ? Plotly.relayout(gd, upd) : Promise.resolve();
   restyleAll();
+  done.then(fixArrows);
 }
 let rsz = null;
 window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(restyleAll, 250); });
