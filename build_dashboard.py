@@ -240,7 +240,8 @@ button:hover,select:hover,input:hover{border-color:var(--accent)}
 .seg button:last-child{border-radius:0 6px 6px 0}
 .seg button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
 .latest{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:14px 16px;margin:0 0 16px}
-.latest h2{font-size:1.02rem;margin:0 0 2px}
+.latest h2{font-size:1.25rem;font-weight:500;margin:0 0 8px}
+.latest h2 .rng{font-size:1.02rem;font-weight:700;margin-left:4px;white-space:nowrap}
 .latest .when{color:var(--muted);font-size:.82rem;margin:0 0 8px}
 .latest p{margin:6px 0}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin:12px 0}
@@ -482,10 +483,9 @@ function renderLatest(){
     (inc ? 'Heating / Unbiased, per day' : 'per day')));
   const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + amt(w.a, w.len) + '</td>' + (inc ? '<td>' + amt(w.u, w.len) + '</td>' : '')
     + (DATA.hasTemps ? '<td>' + deg(w.t) + '</td>' : '') + '</tr>').join('');
-  el.innerHTML = '<h2 id="latest-h">Latest 24 hours · ' + niceD(dayT) + '</h2>'
-    + '<p class="when">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN)
-    + (age > 2 ? ' · <span class="warn">this post is ' + age + ' days old</span>' : '')
-    + (L.inSeason ? '' : ' · <span class="warn">outside the Oct–Apr season, so it is not in the charts below</span>') + '</p>'
+  const notes = (age > 2 ? ['the latest data is ' + age + ' days old'] : []).concat(L.inSeason ? [] : ['outside the Oct–Apr season, so not in the charts below']);
+  el.innerHTML = '<h2 id="latest-h">Heating in the last 24 hours <b class="rng">(' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' → ' + niceT(dayT + 8*HOUR + 30*MIN) + ')</b></h2>'
+    + (notes.length ? '<p class="when"><span class="warn">' + notes.join(' · ') + '</span></p>' : '')
     + '<p>' + parts.join(' ') + '</p><div class="tiles">' + tiles.join('') + '</div>'
     + '<table><thead><tr><th>Window</th><th>Heating</th>' + (inc ? '<th>Unbiased</th>' : '') + (DATA.hasTemps ? '<th>Temp at start</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
 }
