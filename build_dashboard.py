@@ -158,6 +158,34 @@ def load_a_minutes(d, w, times, temps):
     return n
 
 
+def day_records(days, window_keys, wdefs, times, temps):
+    """Per post date: Adjusted minutes per window, Unbiased per window, Load A minutes per window (None without temps)."""
+    out = {}
+    for d in sorted(days):
+        a = [num(days[d]["Adjusted"][k]) for k in window_keys]
+        u = [num(days[d]["Unbiased"][k]) for k in window_keys]
+        p = [load_a_minutes(d, w, times, temps) for w in wdefs]
+        out[d.isoformat()] = a + u + p
+    return out
+
+
+def hourly_local(times, temps):
+    """Hourly temperatures on the London wall clock: a start time and one value per hour (x10, None for gaps)."""
+    if not times:
+        return None
+    loc = {}
+    for t, v in zip(times, temps):
+        k = datetime.fromtimestamp(t, LONDON).replace(tzinfo=None, minute=0, second=0)
+        loc.setdefault(k, v)            # the repeated hour when the clocks go back keeps its first reading
+    t0, t1 = min(loc), max(loc)
+    vals, k = [], t0
+    while k <= t1:
+        v = loc.get(k)
+        vals.append(None if v is None else round(v * 10))
+        k += timedelta(hours=1)
+    return {"start": t0.strftime("%Y-%m-%d %H:%M"), "v": vals}
+
+
 def latest_day(days, window_keys, wdefs, times, temps):
     """Everything the 24-hour panel at the top needs: hourly temperatures, the Load A curves, actual and expected minutes."""
     d = max(days)
@@ -303,7 +331,9 @@ def build_payload(csv_path, temp_path=None, temp_tz="UTC", correct=True):
         "cappedCount": len(capped),
         "cappedDays": len({c[0] for c in capped}),
         "latest": latest_summary(days, window_keys, wdefs, times, temps),
-        "day": latest_day(days, window_keys, wdefs, times, temps),
+        "days": day_records(days, window_keys, wdefs, times, temps),
+        "temps": hourly_local(times, temps),
+        "loadA": {k: [list(p) for p in v] for k, v in LOAD_A.items()},
         "tempCorrected": bool(correct and times),
         "dataThrough": max(days).isoformat(),
         "built": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -355,9 +385,19 @@ button:hover,select:hover,input:hover{border-color:var(--accent)}
 .latest th{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:500}
 .latest tr:last-child td{border-bottom:0}
 .latest .warn{color:var(--muted);font-style:italic}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:8px 0 12px;flex-wrap:wrap}
+.tabs button{border:0;border-bottom:3px solid transparent;border-radius:0;background:none;padding:8px 14px;font-weight:600;color:var(--muted);min-height:40px}
+.tabs button[aria-selected=true]{color:var(--accent);border-bottom-color:var(--accent)}
+.tabs button:hover{color:var(--fg)}
+.shared{display:flex;justify-content:flex-end;margin:-6px 0 8px}
+.ctl-inline{flex-direction:row;align-items:center;gap:8px}
+.daynav{display:flex;align-items:center;gap:8px;margin:0 0 12px;flex-wrap:wrap}
+.daynav button{min-width:40px;font-size:1rem}
+.daynav button:disabled{opacity:.35;cursor:default}
+.daynav .hint{color:var(--muted);font-size:.8rem}
 .day{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:14px;align-items:start;margin-top:4px}
 @media (max-width:860px){.day{grid-template-columns:1fr}}
-#day24{width:100%;min-height:380px}
+.day24{width:100%;min-height:380px}
 .dm{display:flex;flex-direction:column;gap:8px}
 .dm-tot,.dm-w{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
 .dm-tot .k{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -378,18 +418,31 @@ noscript{display:block;padding:12px;color:var(--muted)}
 <body>
 <main>
   <h1>Barbican underfloor heating</h1>
-  <section class="latest" id="latest" aria-labelledby="latest-h"></section>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button type="button" role="tab" id="tb-latest" aria-controls="tab-latest" aria-selected="true">Latest</button>
+    <button type="button" role="tab" id="tb-day" aria-controls="tab-day" aria-selected="false" tabindex="-1">Explore a day</button>
+    <button type="button" role="tab" id="tb-trends" aria-controls="tab-trends" aria-selected="false" tabindex="-1">Long-term</button>
+  </nav>
+  <div class="shared">    <div class="ctl ctl-inline"><span class="lab">Units</span>
+      <div class="seg" id="units" role="group" aria-label="Units">
+        <button type="button" data-v="pct" aria-pressed="true">% of window</button>
+        <button type="button" data-v="min" aria-pressed="false">Minutes</button>
+      </div></div>
+  </div>
+  <section class="tabp" id="tab-latest" role="tabpanel" aria-labelledby="tb-latest"><div class="latest" id="latest"></div></section>
+  <section class="tabp" id="tab-day" role="tabpanel" aria-labelledby="tb-day" hidden>
+    <div class="daynav"><button type="button" id="dprev" aria-label="Previous day">◀</button><input type="date" id="dpick" aria-label="Choose a day"><button type="button" id="dnext" aria-label="Next day">▶</button><span class="hint">or use the ← → keys</span></div>
+    <div class="latest" id="dayx"></div>
+  </section>
+  <section class="tabp" id="tab-trends" role="tabpanel" aria-labelledby="tb-trends" hidden>
   <div class="controls">
     <div class="ctl"><label for="season">Heating season</label><select id="season"></select></div>
-    <div class="ctl"><span class="lab">Units</span>
-      <div class="seg" id="units" role="group" aria-label="Units">
-        <button type="button" data-v="min" aria-pressed="true">Minutes</button>
-        <button type="button" data-v="pct" aria-pressed="false">% of window</button>
-      </div></div>
+    <div class="ctl"><label for="month">Month</label><select id="month"></select></div>
     <div class="ctl"><label for="from">From</label><input type="date" id="from"></div>
     <div class="ctl"><label for="to">To</label><input type="date" id="to"></div>
   </div>
   <div id="chart"></div>
+  </section>
   <label class="opt"><input type="checkbox" id="unb" autocomplete="off"> Include unbiased data</label>
   <footer id="foot"></footer>
   <noscript>This dashboard needs JavaScript.</noscript>
@@ -421,9 +474,20 @@ const sum = a => a.reduce((p, c) => p + c, 0);
 
 const W = DATA.windows;
 const SUM_LEN = sum(W.map(w => w.len));
-const state = { season: DATA.seasons[0].id, unbiased: false, units: 'min' };
+const state = { season: DATA.seasons[0].id, unbiased: false, units: 'pct' };
 const getSeason = () => DATA.seasons.filter(s => s.id === state.season)[0];
 const bounds = S => ({ first: ms(S.rows[0][0]), last: ms(S.rows[S.rows.length - 1][0]) });
+// months of a season: each starts at noon on the last day of the previous month, the edge between two post days
+const MON3 = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function seasonMonths(S){
+  const seen = [];
+  S.rows.forEach(r => { const k = r[0].slice(0, 7); if (seen.indexOf(k) < 0) seen.push(k); });
+  return seen.map(k => { const y = +k.slice(0, 4), m = +k.slice(5, 7); const a = Date.UTC(y, m - 1, 1) - 12*HOUR, b = Date.UTC(y, m, 1) - 12*HOUR;
+    return { key: k, label: MON3[m - 1], full: MON3[m - 1] + ' ' + y, t: a, a: a, b: b }; });
+}
+function monthMarks(S){ return seasonMonths(S); }
+const monthRange = (S, key) => { const b = bounds(S), m = seasonMonths(S).filter(x => x.key === key)[0];
+  return [stamp(Math.max(m.a, b.first - 12*HOUR)), stamp(Math.min(m.b, b.last + 12*HOUR))]; };
 const wholeRange = S => { const b = bounds(S); return [stamp(b.first - 12*HOUR), stamp(b.last + 12*HOUR)]; };
 
 function build(){
@@ -570,112 +634,163 @@ function build(){
     yaxis: hAxis(D1, 'x', pct ? 'Heating as % of window length' : 'Minutes heating in window'),
     yaxis2: hAxis(D2, 'x2', pct ? 'Daily total (% of ' + SUM_LEN + ' min)' : 'Daily total (min)'),
     yaxis3: tAxis(D1, 'x', 'y', trW, 'Temperature at start of window'),
-    yaxis4: tAxis(D2, 'x2', 'y2', trD, 'Average temp, 24 h')
+    yaxis4: tAxis(D2, 'x2', 'y2', trD, 'Average temp, 24 h'),
+    shapes: monthMarks(S).map(m => ({ type: 'line', xref: 'x', yref: 'paper', x0: stamp(m.t), x1: stamp(m.t), y0: 0, y1: 1, line: { color: '#b8bec8', width: 1, dash: 'dot' }, layer: 'below' })),
+    annotations: monthMarks(S).map(m => ({ x: stamp(m.t), xref: 'x', y: 0.995, yref: 'paper', xanchor: 'left', yanchor: 'top', text: ' ' + m.label, showarrow: false, font: { size: 11, color: '#7b8494' } }))
   };
   return { data: data, layout: layout, S: S, wp: wp, n: nSer, tv: { wx: wp.map(p => p.t), wv: wp.map(p => p.v), wxe: wp.filter(p => p.ve !== null).map(p => p.t), wve: wp.filter(p => p.ve !== null).map(p => p.ve), dx: dp.map(p => p.t), dv: dp.map(p => p.v) } };
 }
 
-function renderLatest(){
-  // Top panel: the last 24 hours as a fixed (no zoom/pan) chart of temperature against the Load A curves, plus key numbers.
-  const L = DATA.latest, Dd = DATA.day, el = $('latest'), pct = state.units === 'pct', inc = state.unbiased;
-  const dayT = ms(L.date);
-  const WC = { '13:00': '#f0b429', '20:30': '#d8512e', '02:30': '#3f7fcf' };
-  const colOf = w => WC[w.label.slice(0, 5)] || '#7a5cc7';
+// ===================== one-day panel (used by the "Latest" and "Explore a day" tabs) =====================
+const WCOLS = { '13:00': '#f0b429', '20:30': '#d8512e', '02:30': '#3f7fcf' };
+const colOfW = w => WCOLS[w.start] || '#7a5cc7';
+const DAYS = DATA.days, DAY_KEYS = Object.keys(DATA.days).sort();
+const TT = DATA.temps ? { t0: axisMs(DATA.temps.start), v: DATA.temps.v } : null;
+const tempAtHour = t => { if (!TT) return null; const i = Math.round((t - TT.t0) / HOUR); const v = TT.v[i]; return v === null || v === undefined ? null : v / 10; };
+const hourlyBetween = (a, b) => { const out = []; for (let t = Math.ceil(a / HOUR) * HOUR; t <= b; t += HOUR) { const v = tempAtHour(t); if (v !== null) out.push([t, v]); } return out; };
+const inSeasonDate = iso => { const m = +iso.slice(5, 7); return m >= 10 || m <= 4; };
+const seasonOf = iso => { const y = +iso.slice(0, 4), m = +iso.slice(5, 7); return m >= 10 ? y : (m <= 4 ? y - 1 : null); };
+
+function dayData(iso){
+  const r = DAYS[iso], nW = W.length, d0 = ms(iso);
+  const wins = W.map((w, k) => { const s = d0 + w.startOff * DAY + hmMs(w.start); return { def: w, label: w.label, len: w.len, start: s, end: s + w.len * MIN, a: r[k], u: r[nW + k], pred: r[2 * nW + k] }; });
+  const post = d0 + 8 * HOUR + 30 * MIN;
+  const S = hourlyBetween(post - DAY - 30 * MIN, post + 30 * MIN);
+  const inDay = S.filter(p => p[0] > post - DAY && p[0] <= post);
+  const tAt = t => { if (!S.length) return null; if (t <= S[0][0]) return S[0][1]; for (let i = 1; i < S.length; i++) if (t <= S[i][0]) return S[i-1][1] + (S[i][1] - S[i-1][1]) * (t - S[i-1][0]) / (S[i][0] - S[i-1][0]); return S[S.length-1][1]; };
+  wins.forEach(w => { w.t0 = S.length ? tAt(w.start) : null; w.t1 = S.length ? tAt(w.end) : null; });
+  return { iso, post, S, tAt, wins, tmean: inDay.length >= 20 ? sum(inDay.map(p => p[1])) / inDay.length : null };
+}
+
+// actual minutes as a share of Load A: this season up to the day, and the same month in other seasons
+function loadAContext(iso){
+  const nW = W.length, se = seasonOf(iso), mo = iso.slice(5, 7);
+  return W.map((w, k) => {
+    let sa = 0, sp = 0, sn = 0, ma = 0, mp = 0;
+    DAY_KEYS.forEach(d => {
+      const r = DAYS[d], p = r[2 * nW + k], s2 = seasonOf(d);
+      if (p === null || s2 === null) return;
+      if (s2 === se && d <= iso) { sa += r[k]; sp += p; sn++; }
+      else if (s2 !== se && d.slice(5, 7) === mo) { ma += r[k]; mp += p; }
+    });
+    return { label: w.label, sa, sp, sn, ma, mp };
+  });
+}
+
+function dayPanel(el, iso, plotId, isLatest){
+  const D = dayData(iso), pct = state.units === 'pct', inc = state.unbiased, dayT = ms(iso);
   const mins = m => Math.round(m) + ' min', pc = (m, n) => Math.round(100 * m / n) + '%';
   const deg = t => t === null || t === undefined ? '–' : t.toFixed(1) + ' °C';
   const sgnMin = d => (d > 0 ? '+' : d < 0 ? '−' : '±') + Math.abs(Math.round(d)) + ' min';
-  const age = Math.round((axisMs(DATA.built.slice(0, 10)) - dayT) / DAY);
-  const notes = (age > 2 ? ['the latest data is ' + age + ' days old'] : []).concat(L.inSeason ? [] : ['outside the Oct–Apr season, so not in the charts below']);
-  const wins = Dd.windows, withPred = wins.filter(w => w.pred !== null);
-  const totA = sum(wins.map(w => w.a)), totU = sum(wins.map(w => w.u)), totP = withPred.length === wins.length ? sum(wins.map(w => w.pred)) : null;
+  const wins = D.wins, totA = sum(wins.map(w => w.a)), totU = sum(wins.map(w => w.u));
+  const totP = wins.every(w => w.pred !== null) ? sum(wins.map(w => w.pred)) : null;
+  const notes = [];
+  if (isLatest) { const age = Math.round((axisMs(DATA.built.slice(0, 10)) - dayT) / DAY); if (age > 2) notes.push('the latest data is ' + age + ' days old'); }
+  if (!inSeasonDate(iso)) notes.push('outside the Oct–Apr heating season');
+  if (!D.S.length) notes.push('no temperature data for this day');
 
-  // ---- key numbers (right of the chart)
-  const big = (m, n) => pct ? pc(m, n) : mins(m);
-  const small = (m, n) => pct ? mins(m) + ' of ' + n : pc(m, n) + ' of ' + n + ' min';
+  const big = (m, n) => pct ? pc(m, n) : mins(m), small = (m, n) => pct ? mins(m) + ' of ' + n : pc(m, n) + ' of ' + n + ' min';
   let dm = '<div class="dm-tot"><div class="k">Heating, all windows</div><div class="v">' + big(totA, SUM_LEN) + '</div>'
     + '<div class="d">' + small(totA, SUM_LEN) + (inc ? ' · unbiased ' + mins(totU) : '') + '</div>'
     + (totP !== null ? '<div class="d">Load A expected ' + mins(totP) + ' (actual ' + sgnMin(totA - totP) + ')</div>' : '')
-    + (L.t !== null && L.t !== undefined ? '<div class="d">Average outside temperature ' + deg(L.t) + '</div>' : '') + '</div>';
+    + (D.tmean !== null ? '<div class="d">Average outside temperature ' + deg(D.tmean) + '</div>' : '') + '</div>';
   dm += wins.map(w => {
     const dif = w.pred === null ? '' : ' · Load A ' + mins(w.pred) + (w.pred !== w.a ? ' (' + sgnMin(w.a - w.pred) + ')' : ', matched');
-    return '<div class="dm-w"><span class="dot" style="background:' + colOf(w) + '"></span><div><div class="lab">' + w.label + '</div>'
+    return '<div class="dm-w"><span class="dot" style="background:' + colOfW(w.def) + '"></span><div><div class="lab">' + w.label + '</div>'
       + '<div class="d">' + (pct ? mins(w.a) + ' of ' + w.len : pc(w.a, w.len) + ' of the window') + dif + (inc ? ' · unbiased ' + mins(w.u) : '') + '</div>'
       + '<div class="d">' + deg(w.t0) + ' → ' + deg(w.t1) + '</div></div><div class="big">' + (pct ? pc(w.a, w.len) : mins(w.a)) + '</div></div>';
   }).join('');
 
-  // ---- how the system compares with Load A (text under the chart)
-  const R = Dd.recent, ratio = (a, e) => e > 0 ? Math.round(100 * a / e) + '%' : null;
-  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const mon = MONTHS[new Date(dayT).getUTCMonth()];
-  const ses = R.filter(r => r.seasonExpected > 30).map(r => r.label + ' ' + ratio(r.seasonActual, r.seasonExpected));
-  const typ = R.filter(r => r.monthExpected > 300).map(r => r.label + ' ' + ratio(r.monthActual, r.monthExpected));
   let disc = '';
-  if (totP !== null) disc += 'In these 24 hours the system heated ' + (totA === totP ? 'exactly what Load A gives' : Math.abs(totA - totP) + ' min ' + (totA < totP ? 'less' : 'more') + ' than Load A would (' + Math.round(100 * totA / Math.max(totP, 1)) + '% of it)') + '. ';
-  if (ses.length && R[0].seasonDays) disc += 'This season so far (' + R[0].seasonDays + ' days), actual as a share of Load A: ' + ses.join(', ') + '. ';
-  if (typ.length) disc += 'In ' + mon + ' in earlier seasons: ' + typ.join(', ') + '. ';
-  disc += 'The system usually runs below Load A after warm or sunny afternoons, most of all in spring.';
-
-  el.innerHTML = '<h2 id="latest-h">Most recent heating window <br> <b class="rng">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' to ' + niceT(dayT + 8*HOUR + 30*MIN) + '</b></h2>'
+  if (inSeasonDate(iso)) {
+    const R = loadAContext(iso), ratio = (a, e) => Math.round(100 * a / e) + '%';
+    const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const ses = R.filter(r => r.sp > 30).map(r => r.label + ' ' + ratio(r.sa, r.sp)), typ = R.filter(r => r.mp > 300).map(r => r.label + ' ' + ratio(r.ma, r.mp));
+    if (totP !== null) disc += 'In these 24 hours the system heated ' + (totA === totP ? 'exactly what Load A gives' : Math.abs(totA - totP) + ' min ' + (totA < totP ? 'less' : 'more') + ' than Load A would (' + Math.round(100 * totA / Math.max(totP, 1)) + '% of it)') + '. ';
+    if (ses.length) disc += 'Season to this date (' + R[0].sn + ' days), actual as a share of Load A: ' + ses.join(', ') + '. ';
+    if (typ.length) disc += 'In ' + MONTHS[+iso.slice(5, 7) - 1] + ' in other seasons: ' + typ.join(', ') + '. ';
+    disc += 'The system usually runs below Load A after warm or sunny afternoons, most of all in spring.';
+  }
+  el.innerHTML = '<h2>' + (isLatest ? 'Most recent heating window' : 'Heating on ' + niceD(dayT)) + ' <br> <b class="rng">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' to ' + niceT(dayT + 8*HOUR + 30*MIN) + '</b></h2>'
     + (notes.length ? '<p class="when"><span class="warn">' + notes.join(' · ') + '</span></p>' : '')
-    + '<div class="day"><div id="day24" role="img" aria-label="Outside temperature over the last 24 hours against the Load A heating curves"></div><div class="dm">' + dm + '</div></div>'
-    + '<p class="disc">' + disc + '</p>';
-  drawDay(colOf);
+    + '<div class="day"><div id="' + plotId + '" class="day24" role="img" aria-label="Outside temperature over these 24 hours against the Load A heating curves"></div><div class="dm">' + dm + '</div></div>'
+    + (disc ? '<p class="disc">' + disc + '</p>' : '');
+  drawDay(plotId, D);
 }
 
-function drawDay(colOf){
-  const Dd = DATA.day, gd2 = $('day24'); if (!gd2) return;
-  const S = Dd.series.map(p => [axisMs(p[0]), p[1]]);
-  const tAt = t => { if (!S.length) return null; if (t <= S[0][0]) return S[0][1]; for (let i = 1; i < S.length; i++) if (t <= S[i][0]) return S[i-1][1] + (S[i][1] - S[i-1][1]) * (t - S[i-1][0]) / (S[i][0] - S[i-1][0]); return S[S.length-1][1]; };
-  const x0 = Dd.post.slice(0, 10), start = axisMs(Dd.post) - DAY - 30*MIN, end = axisMs(Dd.post) + 30*MIN;
+function drawDay(plotId, D){
+  const gd2 = $(plotId); if (!gd2) return;
+  const S = D.S, start = D.post - DAY - 30 * MIN, end = D.post + 30 * MIN;
   const tint = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; };
   const data = [], shapes = [], ann = [];
   let lo = Infinity, hi = -Infinity;
   S.forEach(p => { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
-  Dd.windows.forEach(w => {
-    const c = colOf(w), ws = axisMs(w.start), we = axisMs(w.end);
+  D.wins.forEach(w => {
+    const c = colOfW(w.def), ws = w.start, we = w.end, pts = DATA.loadA[w.def.start];
     shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: stamp(ws), x1: stamp(we), y0: 0.25, y1: 1, fillcolor: tint(c, 0.07), line: { width: 0 }, layer: 'below' });
     ann.push({ x: stamp((ws + we) / 2), y: 1.0, xref: 'x', yref: 'paper', yanchor: 'bottom', text: '<b>' + w.label + '</b>', showarrow: false, font: { size: 11, color: c } });
-    if (w.curve) {
-      const cx = w.curve.map(p => axisMs(p[0])), cy = w.curve.map(p => p[1]);
+    if (pts) {
+      const cx = pts.map(p => ws + p[0] * MIN), cy = pts.map(p => p[1]);
       cy.forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
-      // shading = minutes Load A expects heating (outside temperature below the curve)
-      const px = [], py = []; let run = null;
-      const flush = () => { if (run && run.length > 1) { run.forEach(q => { px.push(stamp(q[0])); py.push(q[1]); }); run.slice().reverse().forEach(q => { px.push(stamp(q[0])); py.push(q[2]); }); px.push(null); py.push(null); } run = null; };
-      for (let t = ws; t <= we; t += MIN) {
-        let k = 1; while (k < cx.length - 1 && t > cx[k]) k++;
-        const cv = cy[k-1] + (cy[k] - cy[k-1]) * (t - cx[k-1]) / (cx[k] - cx[k-1]), tv = tAt(t);
-        if (tv !== null && tv < cv) { (run = run || []).push([t, cv, tv]); } else flush();
+      if (S.length) {   // shading = when Load A expects heating (outside temperature below the curve)
+        const px = [], py = []; let run = null;
+        const flush = () => { if (run && run.length > 1) { run.forEach(q => { px.push(stamp(q[0])); py.push(q[1]); }); run.slice().reverse().forEach(q => { px.push(stamp(q[0])); py.push(q[2]); }); px.push(null); py.push(null); } run = null; };
+        for (let t = ws; t <= we; t += MIN) {
+          let k = 1; while (k < cx.length - 1 && t > cx[k]) k++;
+          const cv = cy[k-1] + (cy[k] - cy[k-1]) * (t - cx[k-1]) / (cx[k] - cx[k-1]), tv = D.tAt(t);
+          if (tv !== null && tv < cv) (run = run || []).push([t, cv, tv]); else flush();
+        }
+        flush();
+        if (px.length) data.push({ type: 'scatter', mode: 'lines', x: px, y: py, fill: 'toself', fillcolor: tint(c, 0.28), line: { width: 0 }, hoverinfo: 'skip', showlegend: false });
       }
-      flush();
-      if (px.length) data.push({ type: 'scatter', mode: 'lines', x: px, y: py, fill: 'toself', fillcolor: tint(c, 0.28), line: { width: 0 }, hoverinfo: 'skip', showlegend: false, xaxis: 'x', yaxis: 'y' });
-      data.push({ type: 'scatter', mode: 'lines', x: cx.map(stamp), y: cy, line: { color: c, width: 2.4 }, name: 'Load A curve', showlegend: false,
-        hovertemplate: 'Load A switch-on threshold %{y:.1f} °C<extra>' + w.label + '</extra>', xaxis: 'x', yaxis: 'y' });
-      [[cx[0], cy[0]], [cx[cx.length-1], cy[cy.length-1]]].forEach(e => data.push({ type: 'scatter', mode: 'lines', x: [stamp(e[0]), stamp(e[0])], y: [-50, e[1]], line: { color: c, width: 1, dash: 'dot' }, hoverinfo: 'skip', showlegend: false, xaxis: 'x', yaxis: 'y' }));
+      data.push({ type: 'scatter', mode: 'lines', x: cx.map(stamp), y: cy, line: { color: c, width: 2.4 }, showlegend: false, hovertemplate: 'Load A switch-on threshold %{y:.1f} °C<extra>' + w.label + '</extra>' });
+      [[cx[0], cy[0]], [cx[cx.length-1], cy[cy.length-1]]].forEach(e => data.push({ type: 'scatter', mode: 'lines', x: [stamp(e[0]), stamp(e[0])], y: [-50, e[1]], line: { color: c, width: 1, dash: 'dot' }, hoverinfo: 'skip', showlegend: false }));
     }
-    // actual vs Load A minutes as two strips under the chart (total minutes, drawn from the window start)
     shapes.push({ type: 'rect', xref: 'x', yref: 'y2', x0: stamp(ws), x1: stamp(ws + w.a * MIN), y0: 1.12, y1: 1.82, fillcolor: c, line: { width: 0 } });
     if (w.pred !== null) shapes.push({ type: 'rect', xref: 'x', yref: 'y2', x0: stamp(ws), x1: stamp(ws + w.pred * MIN), y0: 0.18, y1: 0.88, fillcolor: tint(c, 0.25), line: { color: c, width: 1.2 } });
     shapes.push({ type: 'line', xref: 'x', yref: 'y2', x0: stamp(we), x1: stamp(we), y0: 0.05, y1: 1.95, line: { color: '#9aa1ad', width: 1, dash: 'dot' } });
-    ann.push({ x: stamp(ws + Math.max(w.a, 0) * MIN), y: 1.47, xref: 'x', yref: 'y2', xanchor: 'left', text: ' ' + w.a, showarrow: false, font: { size: 10, color: '#1f2937' } });
+    ann.push({ x: stamp(ws + w.a * MIN), y: 1.47, xref: 'x', yref: 'y2', xanchor: 'left', text: ' ' + w.a, showarrow: false, font: { size: 10, color: '#1f2937' } });
     if (w.pred !== null) ann.push({ x: stamp(ws + w.pred * MIN), y: 0.53, xref: 'x', yref: 'y2', xanchor: 'left', text: ' ' + w.pred, showarrow: false, font: { size: 10, color: '#5b6472' } });
   });
   if (S.length) data.push({ type: 'scatter', mode: 'lines+markers', x: S.map(p => stamp(p[0])), y: S.map(p => p[1]), line: { color: '#111', width: 2 }, marker: { size: 4, color: '#111' },
-    name: 'Outside temperature (corrected)', hovertemplate: '%{x|%H:%M} · <b>%{y:.1f} °C</b><extra>outside</extra>', xaxis: 'x', yaxis: 'y', showlegend: true });
-  // legend-only items (x on the axis, y empty)
-  data.push({ type: 'scatter', mode: 'lines', x: [stamp(start)], y: [null], line: { color: '#7b8494', width: 2.4 }, name: 'Load A switch-on curve', xaxis: 'x', yaxis: 'y' });
-  data.push({ type: 'scatter', mode: 'markers', x: [stamp(start)], y: [null], marker: { symbol: 'square', size: 11, color: 'rgba(123,132,148,0.35)' }, name: 'Heating expected by Load A', xaxis: 'x', yaxis: 'y' });
-  const yr = [Math.floor(Math.min(lo, -1)) - 1, Math.ceil(hi) + 1];
+    name: 'Outside temperature (corrected)', hovertemplate: '%{x|%H:%M} · <b>%{y:.1f} °C</b><extra>outside</extra>' });
+  data.push({ type: 'scatter', mode: 'lines', x: [stamp(start)], y: [null], line: { color: '#7b8494', width: 2.4 }, name: 'Load A switch-on curve' });
+  data.push({ type: 'scatter', mode: 'markers', x: [stamp(start)], y: [null], marker: { symbol: 'square', size: 11, color: 'rgba(123,132,148,0.35)' }, name: 'Heating expected by Load A' });
+  if (!isFinite(lo)) { lo = 0; hi = 15; }
   const layout = {
     height: 380, margin: { l: 44, r: 10, t: 26, b: 34 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: '#ffffff', dragmode: false, hovermode: 'closest',
     font: { color: css('--fg'), size: 11, family: 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif' },
     hoverlabel: { bgcolor: '#ffffff', bordercolor: css('--line'), font: { color: css('--fg') } },
     legend: { orientation: 'h', x: 0, y: -0.09, yanchor: 'top', font: { size: 10.5 } },
     xaxis: { type: 'date', range: [stamp(start), stamp(end)], fixedrange: true, tickformat: '%H:%M', dtick: (gd2.clientWidth < 600 ? 4 : 2) * HOUR, tickangle: 0, gridcolor: css('--line'), anchor: 'y2' },
-    yaxis: { domain: [0.25, 1], range: yr, fixedrange: true, ticksuffix: '°', gridcolor: css('--line'), zeroline: true, zerolinecolor: '#c9ced6' },
+    yaxis: { domain: [0.25, 1], range: [Math.floor(Math.min(lo, -1)) - 1, Math.ceil(hi) + 1], fixedrange: true, ticksuffix: '°', gridcolor: css('--line'), zeroline: true, zerolinecolor: '#c9ced6' },
     yaxis2: { domain: [0, 0.17], range: [0, 2], fixedrange: true, tickvals: [0.53, 1.47], ticktext: ['Load A', 'Actual'], showgrid: false, zeroline: false, tickfont: { size: 10 } },
     shapes: shapes, annotations: ann
   };
-  Plotly.react(gd2, data, layout, { displayModeBar: false, scrollZoom: false, doubleClick: false, responsive: true, staticPlot: false });
+  Plotly.react(gd2, data, layout, { displayModeBar: false, scrollZoom: false, doubleClick: false, responsive: true });
+}
+
+// ===================== tabs =====================
+const TABS = ['latest', 'day', 'trends'];
+let curTab = 'latest', trendsDrawn = false, exploreDate = DAY_KEYS[DAY_KEYS.length - 1];
+function renderLatest(){ if (curTab === 'latest') dayPanel($('latest'), DAY_KEYS[DAY_KEYS.length - 1], 'day24-latest', true); else if (curTab === 'day') renderExplore(); }
+function renderExplore(){
+  const i = DAY_KEYS.indexOf(exploreDate);
+  $('dpick').value = exploreDate; $('dprev').disabled = i <= 0; $('dnext').disabled = i >= DAY_KEYS.length - 1;
+  dayPanel($('dayx'), exploreDate, 'day24-explore', false);
+}
+function setExplore(iso){
+  // snap to the nearest date that has a post
+  if (!DAYS[iso]) { const later = DAY_KEYS.find(d => d >= iso); iso = later || DAY_KEYS[DAY_KEYS.length - 1]; }
+  exploreDate = iso; renderExplore(); syncHash();
+}
+function syncHash(){ const h = curTab === 'day' ? '#day=' + exploreDate : '#' + curTab; if (location.hash !== h) history.replaceState(null, '', h); }
+function showTab(t){
+  curTab = t;
+  TABS.forEach(x => { const on = x === t; $('tab-' + x).hidden = !on; const b = $('tb-' + x); b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; });
+  if (t === 'trends') { if (!trendsDrawn) { trendsDrawn = true; render(true); } else Plotly.Plots.resize(gd); }
+  else renderLatest();
+  syncHash();
 }
 
 function render(reset){
@@ -811,11 +926,19 @@ window.addEventListener('resize', () => { clearTimeout(rsz); rsz = setTimeout(re
 function syncInputs(){
   const r = gd._fullLayout && gd._fullLayout.xaxis && gd._fullLayout.xaxis.range;
   if (!r) return;
-  let a = axisMs(r[0]);
-  const first = bounds(getSeason()).first;
-  if (a < first && a >= first - 12*HOUR) a = first;  // the 12 h of padding before day one is not a separate date
-  $('from').value = dstr(a);
+  const a = axisMs(r[0]);
+  $('from').value = dstr(a + 12*HOUR);   // ranges start at noon, the edge between two post days
   $('to').value = dstr(axisMs(r[1]) - MIN);
+  const S = getSeason(), r0 = r.map(axisMs), same = (x, y) => Math.abs(axisMs(x[0]) - r0[0]) < HOUR && Math.abs(axisMs(x[1]) - r0[1]) < HOUR;
+  let v = same(wholeRange(S)) ? '' : 'custom';
+  seasonMonths(S).forEach(m => { if (same(monthRange(S, m.key))) v = m.key; });
+  $('month').value = v;
+}
+function fillMonths(){
+  const S = getSeason(), ms_ = $('month');
+  ms_.innerHTML = '<option value="">Whole season</option>' + seasonMonths(S).map(m => '<option value="' + m.key + '">' + m.full + '</option>').join('')
+    + '<option value="custom" hidden>Custom range</option>';
+  ms_.value = '';
 }
 
 function applyDates(){
@@ -829,18 +952,24 @@ function applyDates(){
 const sel = $('season');
 DATA.seasons.forEach(s => { const o = document.createElement('option'); o.value = s.id; o.textContent = s.label + ' (' + s.rows.length + ' days)'; sel.appendChild(o); });
 sel.value = state.season;
-sel.addEventListener('change', () => { state.season = sel.value; render(true); });
+fillMonths();
+sel.addEventListener('change', () => { state.season = sel.value; fillMonths(); if (trendsDrawn) render(true); });
+$('month').addEventListener('change', () => {
+  const v = $('month').value, S = getSeason();
+  if (v === 'custom' || !trendsDrawn) return;
+  Plotly.relayout(gd, { 'xaxis.range': v ? monthRange(S, v) : wholeRange(S) });
+});
 function wireSeg(id, key){
   const btns = Array.prototype.slice.call($(id).querySelectorAll('button'));
   btns.forEach(btn => btn.addEventListener('click', () => {
     state[key] = btn.getAttribute('data-v');
     btns.forEach(x => x.setAttribute('aria-pressed', String(x === btn)));
     renderLatest();
-    render(false);
+    if (trendsDrawn) render(false);
   }));
 }
 $('unb').checked = false;
-$('unb').addEventListener('change', () => { state.unbiased = $('unb').checked; renderLatest(); render(false); });
+$('unb').addEventListener('change', () => { state.unbiased = $('unb').checked; renderLatest(); if (trendsDrawn) render(false); });
 wireSeg('units', 'units');
 $('from').addEventListener('change', applyDates);
 $('to').addEventListener('change', applyDates);
@@ -849,8 +978,25 @@ $('foot').textContent = 'Source: Barbican Underfloor Heating blog (Atom feed) ·
   ' · page built ' + DATA.built + (DATA.tempCorrected ? ' · temperatures bias-corrected to the City of London Barbican sensors' : '') +
   ' · Oct–Apr only; May–Sep posts are ignored' +
   (DATA.cappedCount ? ' · ' + DATA.cappedCount + ' readings (' + DATA.cappedDays + ' days) above their window length are capped at the window length' : '');
-renderLatest();
-render(true);
+TABS.forEach(t => $('tb-' + t).addEventListener('click', () => showTab(t)));
+document.querySelector('.tabs').addEventListener('keydown', e => {   // arrow keys move between tabs
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const i = TABS.indexOf(curTab), j = (i + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length;
+  showTab(TABS[j]); $('tb-' + TABS[j]).focus(); e.preventDefault();
+});
+$('dpick').min = DAY_KEYS[0]; $('dpick').max = DAY_KEYS[DAY_KEYS.length - 1];
+$('dpick').addEventListener('change', () => { if ($('dpick').value) setExplore($('dpick').value); });
+const step = k => { const i = DAY_KEYS.indexOf(exploreDate) + k; if (i >= 0 && i < DAY_KEYS.length) setExplore(DAY_KEYS[i]); };
+$('dprev').addEventListener('click', () => step(-1));
+$('dnext').addEventListener('click', () => step(1));
+document.addEventListener('keydown', e => {
+  if (curTab !== 'day' || e.target.closest('input,select,textarea,.tabs')) return;
+  if (e.key === 'ArrowLeft') { step(-1); e.preventDefault(); } else if (e.key === 'ArrowRight') { step(1); e.preventDefault(); }
+});
+// open the tab (and day) named in the address, e.g. #trends or #day=2025-01-12
+(function(){ const h = location.hash.slice(1);
+  if (h.indexOf('day=') === 0) { exploreDate = DAYS[h.slice(4)] ? h.slice(4) : exploreDate; showTab('day'); }
+  else showTab(TABS.indexOf(h) >= 0 ? h : 'latest'); })();
 })();
 </script>
 </body>
