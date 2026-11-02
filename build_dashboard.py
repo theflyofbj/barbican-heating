@@ -15,6 +15,7 @@ import argparse
 import csv
 import json
 import bisect
+import math
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -25,6 +26,16 @@ PROFILES = ["Unbiased", "Adjusted"]
 LONDON = ZoneInfo("Europe/London")
 POST_TIME = timedelta(hours=8, minutes=30)
 SEASON_FIRST_MONTH, SEASON_LAST_MONTH = 10, 4  # October .. April
+
+# Bias correction of Open-Meteo to the City of London Barbican climate sensors (fitted on ~4,000 hourly readings,
+# Oct 2024 - Oct 2026): corrected = b0 + b1*T + b2*clip(2 - T, 0, 4) + daily harmonics of the local hour.
+BIAS_BETA = [0.4928, 0.9540, 0.5654, 0.2136, 0.1732, -0.0957, -0.0963]
+
+# "Load A" switch-on curves from the archive Centron chart, per window (minutes after the window starts, threshold degC).
+# Heating is expected while the outside temperature is below the curve.
+LOAD_A = {"13:00": [(0, -1.0), (120, 10.4), (180, 4.5)],
+          "20:30": [(0, -1.0), (210, 12.7), (300, 6.8)],
+          "02:30": [(0, 5.7), (210, 15.0), (300, 11.1)]}
 
 
 def season_start_year(d):
@@ -104,6 +115,92 @@ def load_temps(path, tz="UTC"):
     return [t for t, _ in rows], [v for _, v in rows]
 
 
+def correct_temps(times, temps):
+    """Apply BIAS_BETA to hourly Open-Meteo temperatures (times are UTC epoch seconds)."""
+    out = []
+    for t, v in zip(times, temps):
+        h = datetime.fromtimestamp(t, LONDON).hour
+        w = 2 * math.pi * h / 24
+        x = [1.0, v, min(max(2 - v, 0.0), 4.0), math.cos(w), math.sin(w), math.cos(2 * w), math.sin(2 * w)]
+        out.append(round(sum(b * xi for b, xi in zip(BIAS_BETA, x)), 2))
+    return out
+
+
+def interp(xs, ys, x):
+    if x <= xs[0]:
+        return ys[0]
+    for i in range(1, len(xs)):
+        if x <= xs[i]:
+            return ys[i - 1] + (ys[i] - ys[i - 1]) * (x - xs[i - 1]) / (xs[i] - xs[i - 1])
+    return ys[-1]
+
+
+def window_start(d, w):
+    return datetime.combine(d, datetime.min.time()) + timedelta(days=w["startOff"], hours=int(w["start"][:2]), minutes=int(w["start"][3:]))
+
+
+def load_a_minutes(d, w, times, temps):
+    """Minutes the Load A curve would heat in window w of post day d (None without temperatures)."""
+    pts = LOAD_A.get(w["start"])
+    if not pts or not times:
+        return None
+    t0 = epoch(window_start(d, w))
+    if t0 < times[0] or t0 + 60 * w["len"] > times[-1]:
+        return None
+    n = 0
+    for m in range(w["len"]):
+        t = t0 + 60 * (m + 0.5)
+        i = bisect.bisect_right(times, t)
+        if times[i] - times[i - 1] > 7200:
+            return None
+        tv = temps[i - 1] + (temps[i] - temps[i - 1]) * (t - times[i - 1]) / (times[i] - times[i - 1])
+        n += tv < interp([q[0] for q in pts], [q[1] for q in pts], m + 0.5)
+    return n
+
+
+def latest_day(days, window_keys, wdefs, times, temps):
+    """Everything the 24-hour panel at the top needs: hourly temperatures, the Load A curves, actual and expected minutes."""
+    d = max(days)
+    base = datetime.combine(d, datetime.min.time())
+    a, b = base - timedelta(days=1) + timedelta(hours=8), base + timedelta(hours=9)
+    series = []
+    if times:
+        i = bisect.bisect_left(times, epoch(a))
+        while i < len(times) and times[i] <= epoch(b):
+            series.append([datetime.fromtimestamp(times[i], LONDON).strftime("%Y-%m-%d %H:%M"), temps[i]])
+            i += 1
+    wins = []
+    for w, k in zip(wdefs, window_keys):
+        s = window_start(d, w)
+        pts = LOAD_A.get(w["start"])
+        wins.append({"label": w["label"], "start": s.strftime("%Y-%m-%d %H:%M"), "len": w["len"],
+                     "end": (s + timedelta(minutes=w["len"])).strftime("%Y-%m-%d %H:%M"),
+                     "a": num(days[d]["Adjusted"][k]), "u": num(days[d]["Unbiased"][k]),
+                     "pred": load_a_minutes(d, w, times, temps),
+                     "curve": [[(s + timedelta(minutes=m)).strftime("%Y-%m-%d %H:%M"), v] for m, v in pts] if pts else None,
+                     "t0": temp_at(times, temps, s), "t1": temp_at(times, temps, s + timedelta(minutes=w["len"]))})
+    # how the system has compared with Load A: this season so far, and the same calendar month in earlier seasons
+    cur = season_start_year(d)
+    recent = []
+    for w, k in zip(wdefs, window_keys):
+        sa = se = ma = me = 0.0; sn = 0
+        for x in days:
+            y = season_start_year(x)
+            if y is None:
+                continue
+            p = load_a_minutes(x, w, times, temps)
+            if p is None:
+                continue
+            if y == cur and x <= d:
+                sa += days[x]["Adjusted"][k]; se += p; sn += 1
+            elif y != cur and x.month == d.month:
+                ma += days[x]["Adjusted"][k]; me += p
+        recent.append({"label": w["label"], "seasonActual": round(sa), "seasonExpected": round(se), "seasonDays": sn,
+                       "monthActual": round(ma), "monthExpected": round(me)})
+    return {"date": d.isoformat(), "series": series, "windows": wins, "recent": recent,
+            "post": (base + POST_TIME).strftime("%Y-%m-%d %H:%M")}
+
+
 def epoch(local_dt):
     """Epoch seconds of a London wall-clock time."""
     return local_dt.replace(tzinfo=LONDON).timestamp()
@@ -169,9 +266,11 @@ def latest_summary(days, window_keys, wdefs, times, temps):
     return out
 
 
-def build_payload(csv_path, temp_path=None, temp_tz="UTC"):
+def build_payload(csv_path, temp_path=None, temp_tz="UTC", correct=True):
     days, window_keys = load(csv_path)
     times, temps = load_temps(temp_path, temp_tz)
+    if correct and times:
+        temps = correct_temps(times, temps)   # every temperature in the app is the bias-corrected one
     wdefs = window_defs(window_keys)
     capped = []   # readings longer than their window cannot be real: cap them at the window length
     for d, profs in days.items():
@@ -204,6 +303,8 @@ def build_payload(csv_path, temp_path=None, temp_tz="UTC"):
         "cappedCount": len(capped),
         "cappedDays": len({c[0] for c in capped}),
         "latest": latest_summary(days, window_keys, wdefs, times, temps),
+        "day": latest_day(days, window_keys, wdefs, times, temps),
+        "tempCorrected": bool(correct and times),
         "dataThrough": max(days).isoformat(),
         "built": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     }
@@ -254,6 +355,19 @@ button:hover,select:hover,input:hover{border-color:var(--accent)}
 .latest th{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:500}
 .latest tr:last-child td{border-bottom:0}
 .latest .warn{color:var(--muted);font-style:italic}
+.day{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:14px;align-items:start;margin-top:4px}
+@media (max-width:860px){.day{grid-template-columns:1fr}}
+#day24{width:100%;min-height:380px}
+.dm{display:flex;flex-direction:column;gap:8px}
+.dm-tot,.dm-w{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
+.dm-tot .k{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.dm-tot .v{font-size:1.6rem;font-weight:650;line-height:1.25}
+.dm .d{font-size:.78rem;color:var(--muted)}
+.dm-w{display:grid;grid-template-columns:10px 1fr auto;gap:8px;align-items:center}
+.dm-w .dot{width:10px;height:10px;border-radius:2px}
+.dm-w .lab{font-weight:600;font-size:.88rem}
+.dm-w .big{font-size:1.25rem;font-weight:650}
+.latest .disc{font-size:.85rem;color:var(--fg);margin:10px 0 0}
 #chart{width:100%;height:min(86vh,880px);min-height:640px}
 .opt{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:.78rem;cursor:pointer;margin:6px 0 2px}
 .opt input{accent-color:#7b8494;margin:0;cursor:pointer}
@@ -462,42 +576,106 @@ function build(){
 }
 
 function renderLatest(){
-  // The summary describes what the charts below show: the standard heating figures, plus the unbiased ones when that box is ticked.
-  const L = DATA.latest, el = $('latest'), pct = state.units === 'pct', inc = state.unbiased;
+  // Top panel: the last 24 hours as a fixed (no zoom/pan) chart of temperature against the Load A curves, plus key numbers.
+  const L = DATA.latest, Dd = DATA.day, el = $('latest'), pct = state.units === 'pct', inc = state.unbiased;
   const dayT = ms(L.date);
-  const mins = m => m + ' min', hrs = m => (m / 60).toFixed(1) + ' h', pc = (m, n) => Math.round(100 * m / n) + '%';
-  const pcd = (m, n) => { const v = 100 * m / n; return (v < 10 ? v.toFixed(1) : Math.round(v)) + '%'; };
-  const big = m => pct ? pcd(m, SUM_LEN) : mins(m);
-  const amt = (m, n) => pct ? pc(m, n) + ' (' + mins(m) + ')' : mins(m) + ' (' + pc(m, n) + ')';     // lead with the unit chosen in the menu
-  const sgn = d => d === 0 ? 'same as' : (pct ? (d > 0 ? '▲ ' + Math.round(100 * d / SUM_LEN) + ' percentage points more than' : '▼ ' + Math.round(-100 * d / SUM_LEN) + ' percentage points fewer than')
-    : (d > 0 ? '▲ ' + d + ' min more than' : '▼ ' + (-d) + ' min fewer than'));
+  const WC = { '13:00': '#f0b429', '20:30': '#d8512e', '02:30': '#3f7fcf' };
+  const colOf = w => WC[w.label.slice(0, 5)] || '#7a5cc7';
+  const mins = m => Math.round(m) + ' min', pc = (m, n) => Math.round(100 * m / n) + '%';
   const deg = t => t === null || t === undefined ? '–' : t.toFixed(1) + ' °C';
+  const sgnMin = d => (d > 0 ? '+' : d < 0 ? '−' : '±') + Math.abs(Math.round(d)) + ' min';
   const age = Math.round((axisMs(DATA.built.slice(0, 10)) - dayT) / DAY);
-  const parts = [];
-  parts.push(pct
-    ? 'The heating ran for <b>' + pc(L.a, SUM_LEN) + '</b> of the ' + SUM_LEN + ' minutes available (' + mins(L.a) + ', ' + hrs(L.a) + (inc ? '; unbiased: ' + pc(L.u, SUM_LEN) + ', ' + mins(L.u) : '') + ').'
-    : 'The heating ran for <b>' + mins(L.a) + ' (' + hrs(L.a) + ')</b>, ' + pc(L.a, SUM_LEN) + ' of the ' + SUM_LEN + ' minutes available' + (inc ? ' (unbiased: ' + mins(L.u) + ')' : '') + '.');
-  const best = L.windows.slice().sort((a, b) => b.a - a.a)[0];
-  parts.push(best.a > 0
-    ? 'Most of it came in the ' + best.label + ' window: ' + (pct ? pc(best.a, best.len) + ' of the window, ' + mins(best.a) : mins(best.a) + ', ' + pc(best.a, best.len) + ' of the window') + (inc ? ' (unbiased: ' + mins(best.u) + ')' : '') + '.'
-    : 'It did not run in any window.');
-  if (L.t !== null && L.t !== undefined) parts.push('The average temperature over the period was <b>' + deg(L.t) + '</b>' + (L.prev && L.prev.t !== null ? ' (' + deg(L.prev.t) + ' the day before)' : '') + '.');
-  if (L.avg) parts.push('The previous ' + L.avg.n + ' days averaged ' + big(L.avg.a) + ' a day' + (inc ? ' (unbiased: ' + big(L.avg.u) + ')' : '') + '.');
-  const tile = (k, v, d) => '<div class="tile"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="d">' + d + '</div></div>';
-  const total = (name, k) => tile(name, big(L[k]),
-    (pct ? mins(L[k]) + ' · ' + hrs(L[k]) : hrs(L[k]) + ' · ' + pc(L[k], SUM_LEN) + ' of all windows') + (L.prev ? '<br>' + sgn(L[k] - L.prev[k]) + ' the day before' : ''));
-  const tiles = [total('Heating, total', 'a')];
-  if (inc) tiles.push(total('Unbiased, total', 'u'));
-  if (DATA.hasTemps) tiles.push(tile('Average temperature', deg(L.t), L.prev ? 'day before: ' + deg(L.prev.t) : 'over the 24 h to 08:30'));
-  if (L.avg) tiles.push(tile('Previous ' + L.avg.n + '-day average', (inc ? [L.avg.a, L.avg.u] : [L.avg.a]).map(v => big(v).replace(' min', '')).join(' / ') + (pct ? '' : ' min'),
-    (inc ? 'Heating / Unbiased, per day' : 'per day')));
-  const rows = L.windows.map(w => '<tr><td>' + w.label + '</td><td>' + amt(w.a, w.len) + '</td>' + (inc ? '<td>' + amt(w.u, w.len) + '</td>' : '')
-    + (DATA.hasTemps ? '<td>' + deg(w.t) + '</td>' : '') + '</tr>').join('');
   const notes = (age > 2 ? ['the latest data is ' + age + ' days old'] : []).concat(L.inSeason ? [] : ['outside the Oct–Apr season, so not in the charts below']);
+  const wins = Dd.windows, withPred = wins.filter(w => w.pred !== null);
+  const totA = sum(wins.map(w => w.a)), totU = sum(wins.map(w => w.u)), totP = withPred.length === wins.length ? sum(wins.map(w => w.pred)) : null;
+
+  // ---- key numbers (right of the chart)
+  const big = (m, n) => pct ? pc(m, n) : mins(m);
+  const small = (m, n) => pct ? mins(m) + ' of ' + n : pc(m, n) + ' of ' + n + ' min';
+  let dm = '<div class="dm-tot"><div class="k">Heating, all windows</div><div class="v">' + big(totA, SUM_LEN) + '</div>'
+    + '<div class="d">' + small(totA, SUM_LEN) + (inc ? ' · unbiased ' + mins(totU) : '') + '</div>'
+    + (totP !== null ? '<div class="d">Load A expected ' + mins(totP) + ' (actual ' + sgnMin(totA - totP) + ')</div>' : '')
+    + (L.t !== null && L.t !== undefined ? '<div class="d">Average outside temperature ' + deg(L.t) + '</div>' : '') + '</div>';
+  dm += wins.map(w => {
+    const dif = w.pred === null ? '' : ' · Load A ' + mins(w.pred) + (w.pred !== w.a ? ' (' + sgnMin(w.a - w.pred) + ')' : ', matched');
+    return '<div class="dm-w"><span class="dot" style="background:' + colOf(w) + '"></span><div><div class="lab">' + w.label + '</div>'
+      + '<div class="d">' + (pct ? mins(w.a) + ' of ' + w.len : pc(w.a, w.len) + ' of the window') + dif + (inc ? ' · unbiased ' + mins(w.u) : '') + '</div>'
+      + '<div class="d">' + deg(w.t0) + ' → ' + deg(w.t1) + '</div></div><div class="big">' + (pct ? pc(w.a, w.len) : mins(w.a)) + '</div></div>';
+  }).join('');
+
+  // ---- how the system compares with Load A (text under the chart)
+  const R = Dd.recent, ratio = (a, e) => e > 0 ? Math.round(100 * a / e) + '%' : null;
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const mon = MONTHS[new Date(dayT).getUTCMonth()];
+  const ses = R.filter(r => r.seasonExpected > 30).map(r => r.label + ' ' + ratio(r.seasonActual, r.seasonExpected));
+  const typ = R.filter(r => r.monthExpected > 300).map(r => r.label + ' ' + ratio(r.monthActual, r.monthExpected));
+  let disc = '';
+  if (totP !== null) disc += 'In these 24 hours the system heated ' + (totA === totP ? 'exactly what Load A gives' : Math.abs(totA - totP) + ' min ' + (totA < totP ? 'less' : 'more') + ' than Load A would (' + Math.round(100 * totA / Math.max(totP, 1)) + '% of it)') + '. ';
+  if (ses.length && R[0].seasonDays) disc += 'This season so far (' + R[0].seasonDays + ' days), actual as a share of Load A: ' + ses.join(', ') + '. ';
+  if (typ.length) disc += 'In ' + mon + ' in earlier seasons: ' + typ.join(', ') + '. ';
+  disc += 'The system usually runs below Load A after warm or sunny afternoons, most of all in spring.';
+
   el.innerHTML = '<h2 id="latest-h">Most recent heating window <br> <b class="rng">' + niceT(dayT - DAY + 8*HOUR + 30*MIN) + ' to ' + niceT(dayT + 8*HOUR + 30*MIN) + '</b></h2>'
     + (notes.length ? '<p class="when"><span class="warn">' + notes.join(' · ') + '</span></p>' : '')
-    + '<p>' + parts.join(' ') + '</p><div class="tiles">' + tiles.join('') + '</div>'
-    + '<table><thead><tr><th>Window</th><th>Heating</th>' + (inc ? '<th>Unbiased</th>' : '') + (DATA.hasTemps ? '<th>Temp at start</th>' : '') + '</tr></thead><tbody>' + rows + '</tbody></table>';
+    + '<div class="day"><div id="day24" role="img" aria-label="Outside temperature over the last 24 hours against the Load A heating curves"></div><div class="dm">' + dm + '</div></div>'
+    + '<p class="disc">' + disc + '</p>';
+  drawDay(colOf);
+}
+
+function drawDay(colOf){
+  const Dd = DATA.day, gd2 = $('day24'); if (!gd2) return;
+  const S = Dd.series.map(p => [axisMs(p[0]), p[1]]);
+  const tAt = t => { if (!S.length) return null; if (t <= S[0][0]) return S[0][1]; for (let i = 1; i < S.length; i++) if (t <= S[i][0]) return S[i-1][1] + (S[i][1] - S[i-1][1]) * (t - S[i-1][0]) / (S[i][0] - S[i-1][0]); return S[S.length-1][1]; };
+  const x0 = Dd.post.slice(0, 10), start = axisMs(Dd.post) - DAY - 30*MIN, end = axisMs(Dd.post) + 30*MIN;
+  const tint = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; };
+  const data = [], shapes = [], ann = [];
+  let lo = Infinity, hi = -Infinity;
+  S.forEach(p => { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
+  Dd.windows.forEach(w => {
+    const c = colOf(w), ws = axisMs(w.start), we = axisMs(w.end);
+    shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0: stamp(ws), x1: stamp(we), y0: 0.25, y1: 1, fillcolor: tint(c, 0.07), line: { width: 0 }, layer: 'below' });
+    ann.push({ x: stamp((ws + we) / 2), y: 1.0, xref: 'x', yref: 'paper', yanchor: 'bottom', text: '<b>' + w.label + '</b>', showarrow: false, font: { size: 11, color: c } });
+    if (w.curve) {
+      const cx = w.curve.map(p => axisMs(p[0])), cy = w.curve.map(p => p[1]);
+      cy.forEach(v => { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+      // shading = minutes Load A expects heating (outside temperature below the curve)
+      const px = [], py = []; let run = null;
+      const flush = () => { if (run && run.length > 1) { run.forEach(q => { px.push(stamp(q[0])); py.push(q[1]); }); run.slice().reverse().forEach(q => { px.push(stamp(q[0])); py.push(q[2]); }); px.push(null); py.push(null); } run = null; };
+      for (let t = ws; t <= we; t += MIN) {
+        let k = 1; while (k < cx.length - 1 && t > cx[k]) k++;
+        const cv = cy[k-1] + (cy[k] - cy[k-1]) * (t - cx[k-1]) / (cx[k] - cx[k-1]), tv = tAt(t);
+        if (tv !== null && tv < cv) { (run = run || []).push([t, cv, tv]); } else flush();
+      }
+      flush();
+      if (px.length) data.push({ type: 'scatter', mode: 'lines', x: px, y: py, fill: 'toself', fillcolor: tint(c, 0.28), line: { width: 0 }, hoverinfo: 'skip', showlegend: false, xaxis: 'x', yaxis: 'y' });
+      data.push({ type: 'scatter', mode: 'lines', x: cx.map(stamp), y: cy, line: { color: c, width: 2.4 }, name: 'Load A curve', showlegend: false,
+        hovertemplate: 'Load A switch-on threshold %{y:.1f} °C<extra>' + w.label + '</extra>', xaxis: 'x', yaxis: 'y' });
+      [[cx[0], cy[0]], [cx[cx.length-1], cy[cy.length-1]]].forEach(e => data.push({ type: 'scatter', mode: 'lines', x: [stamp(e[0]), stamp(e[0])], y: [-50, e[1]], line: { color: c, width: 1, dash: 'dot' }, hoverinfo: 'skip', showlegend: false, xaxis: 'x', yaxis: 'y' }));
+    }
+    // actual vs Load A minutes as two strips under the chart (total minutes, drawn from the window start)
+    shapes.push({ type: 'rect', xref: 'x', yref: 'y2', x0: stamp(ws), x1: stamp(ws + w.a * MIN), y0: 1.12, y1: 1.82, fillcolor: c, line: { width: 0 } });
+    if (w.pred !== null) shapes.push({ type: 'rect', xref: 'x', yref: 'y2', x0: stamp(ws), x1: stamp(ws + w.pred * MIN), y0: 0.18, y1: 0.88, fillcolor: tint(c, 0.25), line: { color: c, width: 1.2 } });
+    shapes.push({ type: 'line', xref: 'x', yref: 'y2', x0: stamp(we), x1: stamp(we), y0: 0.05, y1: 1.95, line: { color: '#9aa1ad', width: 1, dash: 'dot' } });
+    ann.push({ x: stamp(ws + Math.max(w.a, 0) * MIN), y: 1.47, xref: 'x', yref: 'y2', xanchor: 'left', text: ' ' + w.a, showarrow: false, font: { size: 10, color: '#1f2937' } });
+    if (w.pred !== null) ann.push({ x: stamp(ws + w.pred * MIN), y: 0.53, xref: 'x', yref: 'y2', xanchor: 'left', text: ' ' + w.pred, showarrow: false, font: { size: 10, color: '#5b6472' } });
+  });
+  if (S.length) data.push({ type: 'scatter', mode: 'lines+markers', x: S.map(p => stamp(p[0])), y: S.map(p => p[1]), line: { color: '#111', width: 2 }, marker: { size: 4, color: '#111' },
+    name: 'Outside temperature (corrected)', hovertemplate: '%{x|%H:%M} · <b>%{y:.1f} °C</b><extra>outside</extra>', xaxis: 'x', yaxis: 'y', showlegend: true });
+  // legend-only items (x on the axis, y empty)
+  data.push({ type: 'scatter', mode: 'lines', x: [stamp(start)], y: [null], line: { color: '#7b8494', width: 2.4 }, name: 'Load A switch-on curve', xaxis: 'x', yaxis: 'y' });
+  data.push({ type: 'scatter', mode: 'markers', x: [stamp(start)], y: [null], marker: { symbol: 'square', size: 11, color: 'rgba(123,132,148,0.35)' }, name: 'Heating expected by Load A', xaxis: 'x', yaxis: 'y' });
+  const yr = [Math.floor(Math.min(lo, -1)) - 1, Math.ceil(hi) + 1];
+  const layout = {
+    height: 380, margin: { l: 44, r: 10, t: 26, b: 34 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: '#ffffff', dragmode: false, hovermode: 'closest',
+    font: { color: css('--fg'), size: 11, family: 'system-ui,-apple-system,"Segoe UI",Roboto,sans-serif' },
+    hoverlabel: { bgcolor: '#ffffff', bordercolor: css('--line'), font: { color: css('--fg') } },
+    legend: { orientation: 'h', x: 0, y: -0.09, yanchor: 'top', font: { size: 10.5 } },
+    xaxis: { type: 'date', range: [stamp(start), stamp(end)], fixedrange: true, tickformat: '%H:%M', dtick: (gd2.clientWidth < 600 ? 4 : 2) * HOUR, tickangle: 0, gridcolor: css('--line'), anchor: 'y2' },
+    yaxis: { domain: [0.25, 1], range: yr, fixedrange: true, ticksuffix: '°', gridcolor: css('--line'), zeroline: true, zerolinecolor: '#c9ced6' },
+    yaxis2: { domain: [0, 0.17], range: [0, 2], fixedrange: true, tickvals: [0.53, 1.47], ticktext: ['Load A', 'Actual'], showgrid: false, zeroline: false, tickfont: { size: 10 } },
+    shapes: shapes, annotations: ann
+  };
+  Plotly.react(gd2, data, layout, { displayModeBar: false, scrollZoom: false, doubleClick: false, responsive: true, staticPlot: false });
 }
 
 function render(reset){
@@ -668,7 +846,7 @@ $('from').addEventListener('change', applyDates);
 $('to').addEventListener('change', applyDates);
 
 $('foot').textContent = 'Source: Barbican Underfloor Heating blog (Atom feed) · data through ' + DATA.dataThrough + (DATA.hasTemps ? ' · temperatures: Open-Meteo, to ' + DATA.tempThrough : '') +
-  ' · page built ' + DATA.built +
+  ' · page built ' + DATA.built + (DATA.tempCorrected ? ' · temperatures bias-corrected to the City of London Barbican sensors' : '') +
   ' · Oct–Apr only; May–Sep posts are ignored' +
   (DATA.cappedCount ? ' · ' + DATA.cappedCount + ' readings (' + DATA.cappedDays + ' days) above their window length are capped at the window length' : '');
 renderLatest();
@@ -685,12 +863,13 @@ def main():
     ap.add_argument("--csv", default="heating_history.csv")
     ap.add_argument("--temps", default="temperature_history.csv")
     ap.add_argument("--temps-tz", default="UTC", choices=["UTC", "London"], help="what the times in the temperature file are (default UTC)")
+    ap.add_argument("--no-temp-correction", action="store_true", help="use raw Open-Meteo temperatures instead of the bias-corrected ones")
     ap.add_argument("--out", default="index.html")
     ap.add_argument("--plotly-js", help="path to a local plotly JS bundle to embed in the page")
     ap.add_argument("--plotly-cdn", action="store_true", help="load Plotly from a CDN instead of plotly-basic.min.js next to the page")
     args = ap.parse_args()
 
-    payload, ignored = build_payload(args.csv, args.temps, args.temps_tz)
+    payload, ignored = build_payload(args.csv, args.temps, args.temps_tz, correct=not args.no_temp_correction)
     if args.plotly_js:
         js = Path(args.plotly_js).read_text(encoding="utf-8").replace("</script", "<\\/script")
         plotly_tag = f"<script>{js}</script>"
