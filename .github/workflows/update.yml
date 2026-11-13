@@ -11,6 +11,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: update-dashboard
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
